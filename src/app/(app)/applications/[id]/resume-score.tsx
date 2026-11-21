@@ -31,7 +31,7 @@ export function ResumeScore({ applicationId, fit, scoring }: { applicationId: st
     }
   });
   const busy = starting || (jobId !== null && job?.status !== "DONE" && job?.status !== "FAILED");
-  const reasons = fit ? [...fit.reasons, ...fit.redFlags.map((flag) => `Watch out: ${flag}`)] : [];
+  const reasons = fit ? [...fit.reasons, ...fit.redFlags.map((flag) => `Watch out: ${flag}`), ...(fit.evidence?.questions ?? [])] : [];
 
   const score = () =>
     startTransition(async () => {

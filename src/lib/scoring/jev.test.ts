@@ -185,18 +185,14 @@ describe("scoreWithJev", () => {
       }),
     );
     const result = await scoreWithJev(posting, profile, { key: "ts-key", fetchImpl, baseUrl: "https://typesafe.test" });
-    expect(result).toEqual({
-      data: {
-        score: 100,
-        reasons: [
-          "Covers: 5+ years of product design",
-          "Covers: Experience with a design system",
-          "Your past roles are close to this job's day-to-day work.",
-          "The role's level matches your experience.",
-        ],
-        redFlags: [],
-      },
+    expect(result).toMatchObject({
+      data: { score: 0, evidence: { requirements: expect.any(Array), questions: expect.any(Array) } },
       scoredWith: `${SCORE_POSTING_JEV_VERSION} (jev-1.14.0)`,
+      hints: [
+        { text: "5+ years of product design", importance: "required" },
+        { text: "Experience with a design system", importance: "required" },
+        { text: "Dutch is a plus", importance: "preferred" },
+      ],
     });
 
     const body = JSON.parse(String(fetchImpl.mock.calls[0][1]?.body)) as { questions: Record<string, { instructions: { line?: string } }> };

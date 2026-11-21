@@ -19,10 +19,11 @@ import {
   type PastSearchDay,
   type SearchProblem as Problem,
   type SearchQuery,
-  type ShownPosting,
+  type ShownStoredPosting,
   type StoredSearch,
 } from "@/lib/job-search/search";
 import { SOURCE_INFO } from "@/lib/job-search/sources";
+import { DEFAULT_SEARCH_PREFERENCES, type SearchPreferences } from "@/lib/job-search/preferences";
 
 import { acceptArbeitsagenturNote, runJobSearch } from "./actions";
 import { PastSearches } from "./past-searches";
@@ -36,6 +37,7 @@ export type JobsScreenProps = {
   arbeitsagenturNote?: boolean;
   /** Score opens a Claude chat, which scores through the connector (#221). */
   scoreInClaude?: boolean;
+  preferences?: SearchPreferences;
   /** Every country by name, named on the server. */
   countries: readonly Country[];
   /** The search, past searches, or the Saved or Dismissed postings. */
@@ -47,7 +49,7 @@ export type JobsScreenProps = {
   /** The URL names a search that's no longer kept. */
   missingSearch?: boolean;
   /** The Saved or Dismissed postings, in those views. */
-  kept?: ShownPosting[];
+  kept?: ShownStoredPosting[];
   /** Past searches by day, in that view. */
   history?: PastSearchDay[];
   /** How many searches, saved and dismissed postings there are, for the tabs. */
@@ -63,6 +65,7 @@ export function JobsScreen({
   source,
   arbeitsagenturNote = false,
   scoreInClaude = false,
+  preferences = DEFAULT_SEARCH_PREFERENCES,
   countries,
   view,
   query,
@@ -100,7 +103,7 @@ export function JobsScreen({
     return (
       <>
         {header}
-        <PostingResults key={view} mode={view} postings={kept} today={today} scoreInClaude={scoreInClaude} />
+        <PostingResults key={view} mode={view} postings={kept} today={today} scoreInClaude={scoreInClaude} preferences={preferences} />
       </>
     );
   }
@@ -152,6 +155,7 @@ export function JobsScreen({
             search={search}
             today={today}
             scoreInClaude={scoreInClaude}
+            preferences={preferences}
             onSearchAgain={() => run(search.query)}
             searching={pending}
           />

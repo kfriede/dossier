@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { DateFormat } from "@/generated/prisma/enums";
 
 import { DATE_FORMATS, formatDocumentDate, settingsFromRows, settingValue, type SettingsData } from "./settings";
+import { DEFAULT_SEARCH_PREFERENCES } from "@/lib/job-search/preferences";
 
 const date = new Date(Date.UTC(2026, 8, 7));
 
@@ -27,6 +28,17 @@ describe("document dates", () => {
 });
 
 describe("stored settings", () => {
+  it("round-trips search preferences and falls back on invalid stored values", () => {
+    const preferences = { ...DEFAULT_SEARCH_PREFERENCES, remote: "firm" as const, questions: "Travel?" };
+    const stored = settingValue(preferences);
+    expect(settingsFromRows([{ key: "searchPreferences", value: stored! }]).searchPreferences).toEqual(preferences);
+    expect(settingsFromRows([{ key: "searchPreferences", value: '{"remote":"firm"}' }]).searchPreferences).toEqual(DEFAULT_SEARCH_PREFERENCES);
+  });
+
+  it("remembers the application queue view", () => {
+    expect(settingsFromRows([{ key: "applicationsView", value: "queue" }]).applicationsView).toBe("queue");
+  });
+
   it("reads an empty table as the prototype's defaults", () => {
     expect(settingsFromRows([])).toEqual({
       setupGuide: null,
@@ -62,6 +74,7 @@ describe("stored settings", () => {
       educationOrder: "date",
       backupProblem: null,
       jobSource: null,
+      searchPreferences: DEFAULT_SEARCH_PREFERENCES,
       jsearchKeyEnc: null,
       jsearchHost: "openwebninja",
       adzunaAppId: null,
@@ -162,4 +175,3 @@ describe("the job agent's settings (E16)", () => {
     expect(odd).toMatchObject({ agentRuns: [], agentHour: 7, agentMinScore: 70, agentMaxScores: 15, agentMaxDrafts: 3 });
   });
 });
-

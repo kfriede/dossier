@@ -13,6 +13,8 @@ import { ApplicationsScreen } from "./applications-screen";
 vi.mock("./actions", () => ({
   rememberListView: vi.fn(async () => ({ ok: true, data: null })),
   reorderBoard: vi.fn(async () => ({ ok: true, data: null })),
+  reorderQueue: vi.fn(async () => ({ ok: true, data: null })),
+  startRecipientHandoff: vi.fn(async () => ({ ok: true, data: "job-1" })),
 }));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn(), replace: vi.fn() }), usePathname: () => null }));
 vi.mock("@/components/change-status", () => ({ changeStatus: vi.fn(async () => true) }));
@@ -39,6 +41,8 @@ const row = (id: string, extra: Partial<ApplicationRow> = {}): ApplicationRow =>
   updated: "2 days ago",
   updatedAt: Date.UTC(2026, 8, 26),
   boardSort: null,
+  queueSort: null,
+  hasRecipientDocuments: true,
   ...extra,
 });
 

@@ -70,6 +70,7 @@ function omit<T extends object, K extends keyof T>(value: T, ...keys: K[]): Omit
 }
 
 const json = (value: unknown) => (value === null || value === undefined ? Prisma.DbNull : (value as Prisma.InputJsonValue));
+const requiredJson = (value: unknown) => (value === null || value === undefined ? Prisma.JsonNull : (value as Prisma.InputJsonValue));
 /** A JSON list for a column that can't be null (#222): anything else reads as empty. */
 const jsonList = (value: unknown) => (Array.isArray(value) ? value : []) as Prisma.InputJsonValue;
 
@@ -108,6 +109,7 @@ export async function importExport(db: PrismaClient, data: DossierExport): Promi
       // notes and jobs along; the other jobs (a resume import, postings read
       // for applications never created) hold the old data too.
       await tx.job.deleteMany();
+      await tx.connectorWriteReceipt.deleteMany();
       await tx.posting.deleteMany();
       await tx.postingSearch.deleteMany();
       await tx.agentCandidate.deleteMany();
@@ -161,7 +163,7 @@ export async function importExport(db: PrismaClient, data: DossierExport): Promi
       const themeIds = new Set((await tx.theme.findMany({ select: { id: true } })).map((theme) => theme.id));
       await tx.application.createMany({
         data: applications.map((application) => ({
-          ...omit(application, "events", "documents", "messages", "notes", "facts", "userNote"),
+          ...omit(application, "events", "documents", "proposals", "messages", "notes", "facts", "userNote"),
           extracted: json(application.extracted),
           match: json(application.match),
           sections: json(application.sections),
@@ -189,6 +191,17 @@ export async function importExport(db: PrismaClient, data: DossierExport): Promi
           application.documents.flatMap((document) =>
             (document.versions ?? []).map((version) => ({ ...version, documentId: document.id, units: version.units as Prisma.InputJsonValue })),
           ),
+        ),
+      });
+      await tx.documentProposal.createMany({
+        data: applications.flatMap((application) =>
+          application.proposals.map((proposal) => ({
+            ...proposal,
+            applicationId: application.id,
+            proposedUnits: requiredJson(proposal.proposedUnits),
+            sourceContext: requiredJson(proposal.sourceContext),
+            warnings: requiredJson(proposal.warnings),
+          })),
         ),
       });
       await tx.chatMessage.createMany({

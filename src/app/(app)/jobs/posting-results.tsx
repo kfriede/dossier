@@ -5,16 +5,19 @@ import { useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode,
 
 import { FitDetails } from "@/components/fit-details";
 import { ScoreBadge } from "@/components/score-badge";
+import { PostingTriage } from "@/components/posting-triage";
 import { linksAttribution, SourceAttribution } from "@/components/source-attribution";
 import { toast, toastResult } from "@/components/toast";
 import { Button, buttonClassName } from "@/components/ui/button";
 import { useJob } from "@/hooks/use-job";
 import { openPendingTab, sendPendingTab } from "@/lib/claude-tab";
 import { cn } from "@/lib/cn";
+import { PostingSource } from "@/generated/prisma/enums";
 import type { PostingFit } from "@/lib/fit";
 import type { JobView } from "@/lib/jobs/runner";
-import { postedAgo, postingKey, type FoundPosting, type PostingState, type ShownPosting, type StoredSearch } from "@/lib/job-search/search";
+import { postedAgo, postingKey, type PostingState, type ShownStoredPosting, type StoredPosting, type StoredSearch } from "@/lib/job-search/search";
 import { arbeitsagenturPage, SOURCE_INFO } from "@/lib/job-search/sources";
+import { DEFAULT_SEARCH_PREFERENCES, triagePosting, type SearchPreferences } from "@/lib/job-search/preferences";
 
 import { dismissFoundPosting, loadFullText, restorePosting, savePostingForLater, showMorePostings, startScoringPosting, unsavePosting } from "./actions";
 import { useStartApplication } from "./use-start-application";
@@ -26,6 +29,7 @@ export type PostingResultsProps = {
   today: string;
   /** Score opens a Claude chat, which scores through the connector: it's on, and Dossier has no AI model of its own (#221). */
   scoreInClaude?: boolean;
+  preferences?: SearchPreferences;
 } & (
   | {
       mode: "search";
@@ -35,7 +39,7 @@ export type PostingResultsProps = {
       onSearchAgain: () => void;
       searching: boolean;
     }
-  | { mode: "saved" | "dismissed"; postings: ShownPosting[] }
+  | { mode: "saved" | "dismissed"; postings: ShownStoredPosting[] }
 );
 
 const plural = (count: number, one: string, many: string) => `${count} ${count === 1 ? one : many}`;
@@ -52,7 +56,7 @@ export function PostingResults(props: PostingResultsProps) {
   const [next, setNext] = useState(mode === "search" ? props.search.next : null);
   const [loadingMore, setLoadingMore] = useState(false);
   const [showDismissed, setShowDismissed] = useState(false);
-  const inView = ({ state }: ShownPosting) => (mode === "saved" ? state.saved : mode === "dismissed" ? state.dismissed : showDismissed || !state.dismissed);
+  const inView = ({ state }: ShownStoredPosting) => (mode === "saved" ? state.saved : mode === "dismissed" ? state.dismissed : showDismissed || !state.dismissed);
   const visible = postings.filter(inView);
   const hidden = mode === "search" ? postings.filter((posting) => posting.state.dismissed).length : 0;
   const [selectedKey, setSelectedKey] = useState(visible[0] ? postingKey(visible[0]) : null);
@@ -72,7 +76,7 @@ export function PostingResults(props: PostingResultsProps) {
   };
 
   /** Changes a posting's state; when that takes it out of the list, the next one takes its place. */
-  const change = (posting: ShownPosting, state: Partial<PostingState>) => {
+  const change = (posting: ShownStoredPosting, state: Partial<PostingState>) => {
     const key = postingKey(posting);
     const index = visible.findIndex((entry) => postingKey(entry) === key);
     const after = visible[index + 1] ?? visible[index - 1];
@@ -80,14 +84,14 @@ export function PostingResults(props: PostingResultsProps) {
     if (!inView({ ...posting, state: { ...posting.state, ...state } }) && after) setSelectedKey(postingKey(after));
   };
 
-  const save = async (posting: ShownPosting) => {
+  const save = async (posting: ShownStoredPosting) => {
     const result = toastResult(await savePostingForLater({ posting: withoutState(posting) }));
     if (!result.ok) return;
     change(posting, { saved: true, dismissed: false, postingId: result.data.postingId });
     setSelectedKey(postingKey(posting));
   };
 
-  const unsave = async (posting: ShownPosting) => {
+  const unsave = async (posting: ShownStoredPosting) => {
     const result = await unsavePosting({ source: posting.source, externalId: posting.externalId });
     if (!result.ok) return void toast(result.error);
     change(posting, { saved: false });
@@ -96,14 +100,14 @@ export function PostingResults(props: PostingResultsProps) {
     else toastResult(result);
   };
 
-  const restore = async (posting: ShownPosting, saved: boolean) => {
+  const restore = async (posting: ShownStoredPosting, saved: boolean) => {
     const result = toastResult(await restorePosting({ source: posting.source, externalId: posting.externalId, saved }));
     if (!result.ok) return;
     change(posting, { dismissed: false, saved });
     if (mode === "dismissed") toast("Brought back. It'll show in your searches again.");
   };
 
-  const dismiss = async (posting: ShownPosting) => {
+  const dismiss = async (posting: ShownStoredPosting) => {
     const result = await dismissFoundPosting({ posting: withoutState(posting) });
     if (!result.ok) return void toast(result.error);
     change(posting, { dismissed: true, saved: false });
@@ -118,7 +122,7 @@ export function PostingResults(props: PostingResultsProps) {
     });
   };
 
-  const score = async (posting: ShownPosting) => {
+  const score = async (posting: ShownStoredPosting) => {
     const key = postingKey(posting);
     if (scoring[key]) return;
     setScoring((current) => ({ ...current, [key]: { jobId: "", step: null } }));
@@ -238,6 +242,7 @@ export function PostingResults(props: PostingResultsProps) {
           onRestore={() => void restore(selected, false)}
           scoring={scoring[postingKey(selected)] ?? null}
           onScore={() => void score(selected)}
+          preferences={props.preferences ?? DEFAULT_SEARCH_PREFERENCES}
         >
           {!selected.state.dismissed && (
             <StartButton starting={starting === postingKey(selected)} onClick={() => void start(withoutState(selected), postingKey(selected))} />
@@ -271,7 +276,7 @@ export function StartButton({ starting, onClick }: { starting: boolean; onClick:
 }
 
 /** The posting as the server takes it back: without where it stands. */
-function withoutState(posting: ShownPosting): FoundPosting {
+function withoutState(posting: ShownStoredPosting): StoredPosting {
   const { state, ...found } = posting;
   void state;
   return found;
@@ -288,13 +293,13 @@ function PostingList({
   scoring,
   onScore,
 }: {
-  postings: ShownPosting[];
+  postings: ShownStoredPosting[];
   selectedKey: string | null;
   now: Date;
   onSelect: (key: string, options?: { reveal?: boolean }) => void;
   /** Postings being scored, by postingKey. */
   scoring: Record<string, unknown>;
-  onScore: (posting: ShownPosting) => void;
+  onScore: (posting: ShownStoredPosting) => void;
 }) {
   // Up and down move through the list, as in a mail inbox.
   const move = (event: KeyboardEvent<HTMLUListElement>) => {
@@ -346,7 +351,7 @@ function PostingList({
                 <span className="min-w-0 truncate text-xs text-muted">
                   {[postedAgo(posting.postedAt, now), posting.via && `via ${posting.via}`, posting.salary].filter(Boolean).join(" · ")}
                 </span>
-                <SourceAttribution source={posting.source} url={posting.url} placeholder />
+                {posting.source !== PostingSource.IMPORTED && <SourceAttribution source={posting.source} url={posting.url} placeholder />}
               </span>
             </button>
             {/* A button can't hold another, so the pill lies over the room the card keeps for it, with the card's border and padding. */}
@@ -367,7 +372,7 @@ function PostingList({
               </span>
             )}
             {/* Adzuna's label is a link, so it lies over room the card keeps too (E14-2). */}
-            {linksAttribution(posting.source) && (
+            {posting.source !== PostingSource.IMPORTED && linksAttribution(posting.source) && (
               <span className="pointer-events-none absolute inset-0 flex items-end justify-end border border-transparent px-4 py-3.5">
                 <SourceAttribution source={posting.source} url={posting.url} className="pointer-events-auto" />
               </span>
@@ -407,10 +412,11 @@ function PostingDetail({
   onRestore,
   scoring,
   onScore,
+  preferences,
   children,
 }: {
   ref: Ref<HTMLElement>;
-  posting: ShownPosting;
+  posting: ShownStoredPosting;
   now: Date;
   onSave: () => void;
   onUnsave: () => void;
@@ -419,20 +425,25 @@ function PostingDetail({
   /** While it's being scored (#208): the step under way. */
   scoring: { step: string | null } | null;
   onScore: () => void;
+  preferences: SearchPreferences;
   /** More actions, before Save (E14-8). */
   children?: ReactNode;
 }) {
   const headingId = useId();
-  const sourcePage = arbeitsagenturPage(posting);
+  const imported = posting.source === PostingSource.IMPORTED;
+  const sourcePage = imported ? null : arbeitsagenturPage(posting);
   // The posting as first shown; the component is keyed by it.
   const [initial] = useState(posting);
-  const [text, setText] = useState<Text>(initial.complete ? { status: "ready", text: initial.description } : { status: "loading" });
+  const [text, setText] = useState<Text>(
+    initial.complete ? { status: "ready", text: initial.description } : imported ? { status: "partial", text: initial.description } : { status: "loading" },
+  );
 
   // A source that only sent the start: ask for the rest (E14-2, E14-3).
   useEffect(() => {
-    if (initial.complete) return;
+    if (initial.complete || initial.source === PostingSource.IMPORTED) return;
+    const providerPosting = { ...withoutState(initial), source: initial.source };
     let current = true;
-    void loadFullText({ posting: withoutState(initial) }).then((result) => {
+    void loadFullText({ posting: providerPosting }).then((result) => {
       if (!current) return;
       const full = result.ok ? result.data.text : null;
       setText(full ? { status: "ready", text: full } : { status: "partial", text: initial.description });
@@ -456,10 +467,35 @@ function PostingDetail({
           {posting.title || "Untitled posting"}
         </h2>
         <p className="text-sm text-muted">{[posting.company, posting.place, posting.remote ? "Remote" : "", posting.salary].filter(Boolean).join(" · ")}</p>
-        {(ago || posting.via) && (
-          <p className="text-meta text-muted">{[ago && `Posted ${ago === "Today" || ago === "Yesterday" ? ago.toLowerCase() : ago}`, posting.via && `via ${posting.via}`].filter(Boolean).join(" · ")}</p>
+        {(ago || posting.via || imported) && (
+          <p className="text-meta text-muted">
+            {[ago && `Posted ${ago === "Today" || ago === "Yesterday" ? ago.toLowerCase() : ago}`, imported ? `Imported from ${posting.sourceKind || "an external source"}` : posting.via && `via ${posting.via}`].filter(Boolean).join(" · ")}
+          </p>
         )}
       </div>
+
+      <PostingTriage triage={triagePosting(posting, preferences)} />
+
+      {imported && (
+        <aside className="rounded-card bg-track px-4 py-3 text-meta">
+          <p>Source details were reported by the importer and have not been verified by Dossier.</p>
+          {posting.sourceUrl && (
+            <p className="mt-1">
+              <a href={posting.sourceUrl} target="_blank" rel="noopener noreferrer" className="underline underline-offset-2">
+                Reported source link
+              </a>
+            </p>
+          )}
+          {(posting.reportedRetrievedAt || posting.reportedCheckedAt) && (
+            <p className="mt-1">
+              {posting.reportedRetrievedAt && `Reported retrieved ${new Date(posting.reportedRetrievedAt).toLocaleDateString()}`}
+              {posting.reportedRetrievedAt && posting.reportedCheckedAt ? " · " : ""}
+              {posting.reportedCheckedAt && `Reported checked ${new Date(posting.reportedCheckedAt).toLocaleDateString()}`}
+            </p>
+          )}
+          {posting.researchNotes && <p className="mt-2 whitespace-pre-line">{posting.researchNotes}</p>}
+        </aside>
+      )}
 
       {state.applicationId && (
         <p role="note" className="rounded-card bg-track px-4 py-3 text-meta">
@@ -522,7 +558,9 @@ function PostingDetail({
           <>
             {text.status === "partial" && (
               <p className="mb-3 rounded-card bg-warning-surface px-4 py-3 text-meta text-warning">
-                This is only the start of the posting. When you start an application, you can paste the rest from the posting&apos;s page.
+                {imported
+                  ? "The importer marked this text incomplete. Dossier won't fetch the source link; open the posting and add the remaining text yourself."
+                  : "This is only the start of the posting. When you start an application, you can paste the rest from the posting's page."}
               </p>
             )}
             <div className="text-sm leading-relaxed whitespace-pre-line">{text.text || "The source didn't send a description."}</div>
@@ -530,7 +568,7 @@ function PostingDetail({
         )}
       </div>
       {/* As the source's terms ask (E14-2, E14-3). */}
-      <SourceAttribution source={posting.source} url={posting.url} className="self-start" />
+      {posting.source !== PostingSource.IMPORTED && <SourceAttribution source={posting.source} url={posting.url} className="self-start" />}
     </section>
   );
 }

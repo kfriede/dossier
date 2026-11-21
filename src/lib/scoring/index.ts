@@ -41,13 +41,16 @@ export async function loadPostingScorer(): Promise<PostingScorer> {
     const jev = jevKey(config);
     if (jev.problem !== null) throw AiError.config(jev.problem);
     const { key } = jev;
-    return (posting, profile, signal) => scoreWithJev(posting, profile, { key, signal, onUsage: recordUsage });
+    return async (posting, profile, signal) => {
+      const { data, scoredWith } = await scoreWithJev(posting, profile, { key, signal, onUsage: recordUsage });
+      return { data, scoredWith };
+    };
   }
   if (!(await isAiConfigured())) throw AiError.config(AI_PROVIDER_MISSING);
   const [provider, options] = await Promise.all([getAiProvider(), loadTaskOptions()]);
   return async (posting, profile, signal) => {
     const { title, company, place, remote, salary } = posting;
-    const { data, promptVersion } = await scorePosting(provider, { posting: postingText(posting), title, company, place, remote, salary, profile }, { ...options, signal });
+    const { data, promptVersion } = await scorePosting(provider, { posting: postingText(posting), description: posting.description, title, company, place, remote, salary, profile }, { ...options, signal });
     return { data, scoredWith: promptVersion };
   };
 }

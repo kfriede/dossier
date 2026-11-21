@@ -3,7 +3,7 @@ import "server-only";
 import { z } from "zod";
 
 import type { AgentCandidate, Prisma } from "@/generated/prisma/client";
-import { AgentCandidateStatus } from "@/generated/prisma/enums";
+import { AgentCandidateStatus, PostingSource } from "@/generated/prisma/enums";
 import { ActionError } from "@/lib/action";
 import { AiError } from "@/lib/ai/errors";
 import { createApplicationFromDocuments, type ApplicationDetails } from "@/lib/application-create";
@@ -30,6 +30,9 @@ export const draftJobKey = (candidateId: string) => `agent-candidate:${candidate
 
 /** A candidate in the shape search results have. */
 export function foundFromCandidate(candidate: AgentCandidate): FoundPosting {
+  if (candidate.source === PostingSource.IMPORTED) {
+    throw new ActionError("Imported postings cannot be drafted by the job agent.");
+  }
   return {
     source: candidate.source,
     externalId: candidate.externalId,
@@ -87,7 +90,16 @@ export async function draftCandidate(candidateId: string, context: JobContext): 
     await context.step(`Writing the draft for ${name}`);
     const settings = await loadSettings();
     const documents = await writeDocumentsJob.run(
-      { readJobId: context.id, posting, extracted: reading.extracted, match: reading.match, tone: settings.defaultTone, note: "", write: "both" },
+      {
+        readJobId: context.id,
+        posting,
+        extracted: reading.extracted,
+        match: reading.match,
+        tone: settings.defaultTone,
+        note: "",
+        write: "both",
+        resumeFamily: "general",
+      },
       context,
     );
     // Keep the whole text, so a retry doesn't fetch it again.
@@ -103,6 +115,7 @@ export async function draftCandidate(candidateId: string, context: JobContext): 
       postingUrl: candidate.url,
       tone: settings.defaultTone,
       note: "",
+      resumeFamily: "general",
       claim: { kind: "agent", candidateId, score: candidate.score },
     });
     // The job holds nothing of the draft, but goes with it all the same.

@@ -61,6 +61,78 @@ describe("importExport (E10-6)", () => {
     expect(await prisma().fact.count()).toBe(3);
   });
 
+  it("round-trips document proposals and reads version 12 files without them", async () => {
+    const application = await prisma().application.findFirstOrThrow({ where: { documents: { some: {} } } });
+    await prisma().application.update({ where: { id: application.id }, data: { queueSort: 2, resumeFamily: "engineering" } });
+    const document = await prisma().document.findFirstOrThrow({ where: { applicationId: application.id } });
+    await prisma().documentProposal.create({
+      data: {
+        applicationId: application.id,
+        documentId: document.id,
+        expectedDocumentRevision: "document-revision",
+        expectedProfileRevision: "profile-revision",
+        proposedUnits: [{ id: "summary", text: "A proposed summary." }],
+        sourceContext: { source: "connector", url: "https://jobs.example/role" },
+        warnings: ["Verify this claim."],
+        status: "APPROVED",
+        createdAt: now,
+        resolvedAt: now,
+      },
+    });
+
+    const file = await asFile();
+    expect(file.schemaVersion).toBe(14);
+    expect(file.applications.find((entry) => entry.id === application.id)).toMatchObject({
+      proposals: [expect.objectContaining({ expectedDocumentRevision: "document-revision" })],
+      queueSort: 2,
+      resumeFamily: "engineering",
+    });
+    await importExport(prisma(), file);
+    expect(await prisma().documentProposal.findMany()).toMatchObject([
+      {
+        applicationId: application.id,
+        documentId: document.id,
+        expectedDocumentRevision: "document-revision",
+        expectedProfileRevision: "profile-revision",
+        proposedUnits: [{ id: "summary", text: "A proposed summary." }],
+        sourceContext: { source: "connector", url: "https://jobs.example/role" },
+        warnings: ["Verify this claim."],
+        status: "APPROVED",
+        createdAt: now,
+        resolvedAt: now,
+      },
+    ]);
+
+    const version13 = {
+      ...file,
+      schemaVersion: 13,
+      applications: file.applications.map(({ queueSort: _queueSort, resumeFamily: _resumeFamily, ...entry }) => {
+        void _queueSort;
+        void _resumeFamily;
+        return entry;
+      }),
+    };
+    const parsed13 = parseExport(JSON.stringify(version13));
+    if (!parsed13.ok) throw new Error(parsed13.error);
+    expect(parsed13.data.applications.find((entry) => entry.id === application.id)).toMatchObject({ queueSort: null, resumeFamily: "general" });
+    await importExport(prisma(), parsed13.data);
+    expect(await prisma().application.findUniqueOrThrow({ where: { id: application.id } })).toMatchObject({ queueSort: null, resumeFamily: "general" });
+
+    const version12 = {
+      ...version13,
+      schemaVersion: 12,
+      applications: version13.applications.map(({ proposals: _proposals, ...entry }) => {
+        void _proposals;
+        return entry;
+      }),
+    };
+    const parsed12 = parseExport(JSON.stringify(version12));
+    if (!parsed12.ok) throw new Error(parsed12.error);
+    expect(parsed12.data.applications.find((entry) => entry.id === application.id)?.proposals).toEqual([]);
+    await importExport(prisma(), parsed12.data);
+    expect(await prisma().documentProposal.count()).toBe(0);
+  });
+
   it("keeps the next interview's date, and reads older files without it (E9-9)", async () => {
     const file = await asFile();
     const at = file.applications.find((application) => application.company === "Northstar Health")!.nextInterviewAt;
@@ -159,6 +231,57 @@ describe("importExport (E10-6)", () => {
 
     await importExport(prisma(), { ...file, applications: file.applications.filter((application) => application.id !== ledgerly.id) });
     expect(await prisma().posting.findFirstOrThrow({ where: { externalId: "job-1" } })).toMatchObject({ applicationId: null });
+  });
+
+  it("restores imported provenance, while older posting records receive empty provenance defaults", async () => {
+    await prisma().posting.create({
+      data: {
+        source: "IMPORTED",
+        externalId: "import-acme-42",
+        title: "Product Designer",
+        company: "Acme",
+        sourceKind: "External research",
+        sourceUrl: "https://research.example/acme",
+        requisitionId: "ACME-42",
+        reportedRetrievedAt: now,
+        reportedCheckedAt: now,
+        researchNotes: "Reported by the source.",
+        savedAt: now,
+      },
+    });
+    const file = await asFile();
+    await prisma().posting.deleteMany();
+    await importExport(prisma(), file);
+    expect(await prisma().posting.findFirstOrThrow({ where: { source: "IMPORTED" } })).toMatchObject({
+      sourceKind: "External research",
+      sourceUrl: "https://research.example/acme",
+      requisitionId: "ACME-42",
+      reportedRetrievedAt: now,
+      reportedCheckedAt: now,
+      researchNotes: "Reported by the source.",
+    });
+
+    await prisma().posting.create({ data: { source: "JSEARCH", externalId: "legacy", title: "Legacy posting" } });
+    const old = JSON.parse(JSON.stringify(await buildExport(prisma(), { now }))) as Record<string, unknown> & { postings: Record<string, unknown>[] };
+    old.schemaVersion = 11;
+    old.postings = old.postings.filter((posting) => posting.externalId === "legacy");
+    for (const posting of old.postings) {
+      delete posting.requisitionId;
+      delete posting.sourceKind;
+      delete posting.sourceUrl;
+      delete posting.reportedRetrievedAt;
+      delete posting.reportedCheckedAt;
+      delete posting.researchNotes;
+    }
+    const parsed = exportSchema.parse(old);
+    expect(parsed.postings.find((posting) => posting.externalId === "legacy")).toMatchObject({
+      requisitionId: null,
+      sourceKind: null,
+      sourceUrl: null,
+      reportedRetrievedAt: null,
+      reportedCheckedAt: null,
+      researchNotes: null,
+    });
   });
 
   it("restores past searches with what they found (E14-10)", async () => {

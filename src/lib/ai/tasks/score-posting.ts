@@ -1,10 +1,12 @@
 import { z } from "zod";
 
-import { experienceMonths, type ProfileData } from "@/lib/profile";
+import type { ProfileData } from "@/lib/profile";
+import type { PostingFit } from "@/lib/fit";
+import { evidenceFit, matchEvidence } from "@/lib/scoring/evidence";
 
 import { postingForPrompt, profileForPrompt, system, UNTRUSTED_POSTING, type Task } from "./prompt-parts";
 
-export const SCORE_POSTING_VERSION = "score-posting@2";
+export const SCORE_POSTING_VERSION = "score-posting@3";
 
 // The job agent's first look at a posting (E16-2): a cheap, explainable fit
 // score before anything is spent on a draft. Adapted from avinashbatchala's
@@ -15,10 +17,11 @@ const answerSchema = z.object({
   score: z.number(),
   reasons: z.array(z.string()),
   redFlags: z.array(z.string()),
+  requirements: z.array(z.object({ text: z.string().min(8).max(2000), importance: z.enum(["required", "preferred"]) })).max(40).optional(),
 });
 
 /** How well a posting fits the profile: 0 to 100, one to four reasons, up to three red flags. */
-export type PostingScore = { score: number; reasons: string[]; redFlags: string[] };
+export type PostingScore = PostingFit;
 
 const INSTRUCTIONS = `You score how well a job posting fits a candidate before anyone writes an application, as JSON.
 
@@ -34,7 +37,9 @@ Give a score from 0 to 100:
 - 50–69: possible fit; meaningful gaps, or a stretch.
 - 0–49: poor fit.
 
-A large seniority gap either way, such as a role asking for 2 to 5 years from someone with 10 or more, or a team member's role for someone who leads teams, makes it a possible fit at best: below 70. Years well beyond what a far more junior role asks for are never a reason it fits.
+Distinguish eligibility conditions such as work authorization from skills. An unstated condition is unknown, not a mismatch. Do not treat total career duration as relevant experience: only experience linked to duties relevant to that requirement can count. Preserve alternative qualifications and don't assume one is mandatory when another is acceptable.
+
+List requirements in the requirements array. Each text must be an exact, contiguous quote from a single line of the posting, not a paraphrase. Mark each required or preferred; omit duties, benefits and company descriptions. Include eligibility conditions and qualification alternatives as written.
 
 - reasons: one to four short sentences, each pointing at a specific requirement of the posting and a specific part of the profile (a role, a project, a skill, a degree). Never invent experience the profile doesn't show.
 - redFlags: up to three real concerns, or none: a missing must-have skill, a seniority mismatch either way (a role far above the candidate's level, or well below it), a location or work-permit requirement the profile can't meet, or a language the candidate doesn't speak.
@@ -44,6 +49,8 @@ Never use age, gender, nationality, ethnicity, religion, disability, family stat
 export type ScorePostingInput = {
   /** The posting's text, as the source gave it. */
   posting: string;
+  /** Source text without the title and metadata prepended for the prompt. */
+  description?: string;
   title: string;
   company: string;
   place: string;
@@ -75,9 +82,7 @@ export function scoreFrom(answer: z.infer<typeof answerSchema>): PostingScore {
 
 /** E16-2: how well a posting fits the profile. Contact details and references are never sent. */
 export const scorePosting: Task<ScorePostingInput, PostingScore> = async (provider, input, { signal }) => {
-  const { posting, profile, title, company, place, remote, salary, today = new Date() } = input;
-  // Models add up date ranges badly, and seniority is judged on it (#279).
-  const years = Math.floor(experienceMonths(profile, today) / 12);
+  const { posting, profile, title, company, place, remote, salary } = input;
   const answer = await provider.complete({
     task: "score-posting",
     system: system(
@@ -90,7 +95,6 @@ export const scorePosting: Task<ScorePostingInput, PostingScore> = async (provid
         role: "user",
         content: [
           `The candidate's profile:\n${profileForPrompt(profile)}`,
-          `The candidate's work experience: ${years === 1 ? "about 1 year" : `about ${years} years`} in all, counting overlapping roles once.`,
           `The posting's facts:\n${JSON.stringify({ title, company, place, remote, salary }, null, 2)}`,
           `The posting:\n${postingForPrompt(posting)}`,
         ].join("\n\n"),
@@ -103,5 +107,5 @@ export const scorePosting: Task<ScorePostingInput, PostingScore> = async (provid
     effort: "low",
     signal,
   });
-  return { data: scoreFrom(answer), promptVersion: SCORE_POSTING_VERSION };
+  return { data: evidenceFit(matchEvidence(input.description ?? posting, profile, input.today, answer.requirements)), promptVersion: SCORE_POSTING_VERSION };
 };

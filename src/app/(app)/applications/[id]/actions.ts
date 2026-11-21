@@ -4,12 +4,13 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 
 import { Prisma } from "@/generated/prisma/client";
-import { ChatRole, DocumentKind, VersionCause } from "@/generated/prisma/enums";
+import { ChatRole, DocumentKind, DocumentProposalStatus, VersionCause } from "@/generated/prisma/enums";
 import { action, ActionError } from "@/lib/action";
 import { isAiConfigured } from "@/lib/ai/config";
 import { profileUnits } from "@/lib/ai/tasks/tailor-resume";
 import { editsSchema, extractedSchema, matchSchema, trimmedSchema, unitsSchema, withSkillAdded } from "@/lib/application-data";
 import { loadDocuments, readJson } from "@/lib/application-documents";
+import { documentRevision } from "@/lib/connector/revisions";
 import { WRITTEN_EMAIL_UNITS } from "@/lib/application-email";
 import { documentLabels } from "@/lib/document-labels";
 import { frozenCopySchema, frozenProfile, readFrozenCopy, withSectionFromProfile } from "@/lib/frozen-copy";
@@ -19,6 +20,7 @@ import { syncInterviewToCalendar } from "@/lib/google/availability";
 import { GoogleError } from "@/lib/google/errors";
 import { isFrameUnit, withFrame, WRITTEN_FRAME_UNITS } from "@/lib/letter-frame";
 import { saveVersion } from "@/lib/document-versions";
+import { profileRevision } from "@/lib/connector/write";
 import { refineJob, refineJobKey } from "@/lib/jobs/refine";
 import { regenerateUnitJob, unitJobKey } from "@/lib/jobs/regenerate-unit";
 import { findUnfinishedJobs, startJob } from "@/lib/jobs/runner";
@@ -39,6 +41,64 @@ const GONE = "That application no longer exists.";
 const PART_GONE = "That part of the document no longer exists. Reload the page to see what's there now.";
 
 const refresh = (id: string) => revalidatePath(`/applications/${id}`);
+
+/** Applies a pending external proposal only if the document and profile are still the versions reviewed. */
+export const approveDocumentProposal = action(
+  z.object({ id: z.string().min(1), proposalId: z.string().min(1) }),
+  async ({ id, proposalId }, { toast }) => {
+    const result = await prisma.$transaction(async (tx) => {
+      const proposal = await tx.documentProposal.findFirst({
+        where: { id: proposalId, applicationId: id, status: DocumentProposalStatus.PENDING },
+        include: { document: true },
+      });
+      if (!proposal) throw new ActionError("That proposal is no longer waiting for review.");
+      const [profile, settings] = await Promise.all([loadProfile(tx), loadSettings(tx)]);
+      const currentUnits = unitsSchema.parse(proposal.document.units);
+      const isStale =
+        documentRevision(proposal.document) !== proposal.expectedDocumentRevision ||
+        profileRevision(profile, settings.resumeSections) !== proposal.expectedProfileRevision;
+      const proposedUnits = unitsSchema.parse(proposal.proposedUnits);
+      const { count } = isStale
+        ? { count: 0 }
+        : await tx.document.updateMany({
+            where: { id: proposal.document.id, updatedAt: proposal.document.updatedAt },
+            data: { units: proposedUnits },
+          });
+      if (count === 0) {
+        await tx.documentProposal.update({
+          where: { id: proposal.id },
+          data: { status: DocumentProposalStatus.STALE, resolvedAt: new Date() },
+        });
+        return "stale" as const;
+      }
+      await saveVersion(tx, proposal.document.id, currentUnits, { cause: VersionCause.BEFORE_PROPOSAL });
+      await saveVersion(tx, proposal.document.id, proposedUnits, { cause: VersionCause.PROPOSED });
+      await tx.documentProposal.update({
+        where: { id: proposal.id },
+        data: { status: DocumentProposalStatus.APPROVED, resolvedAt: new Date() },
+      });
+      return "approved" as const;
+    });
+    refresh(id);
+    toast(result === "approved" ? "Proposal approved." : "The document or profile changed. This proposal is out of date.");
+    return { result };
+  },
+);
+
+/** Rejects a pending proposal without touching its application or documents. */
+export const rejectDocumentProposal = action(
+  z.object({ id: z.string().min(1), proposalId: z.string().min(1) }),
+  async ({ id, proposalId }, { toast }) => {
+    const { count } = await prisma.documentProposal.updateMany({
+      where: { id: proposalId, applicationId: id, status: DocumentProposalStatus.PENDING },
+      data: { status: DocumentProposalStatus.REJECTED, resolvedAt: new Date() },
+    });
+    if (count === 0) throw new ActionError("That proposal is no longer waiting for review.");
+    refresh(id);
+    toast("Proposal rejected.");
+    return null;
+  },
+);
 
 /** The Resume tab's layout switch (APP-4): the theme's own layout, or a single column. */
 export const setFollowThemeLayout = action(

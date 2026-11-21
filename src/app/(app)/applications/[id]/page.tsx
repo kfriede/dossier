@@ -1,10 +1,14 @@
 import type { Metadata } from "next";
 import { cache } from "react";
+import { z } from "zod";
 
 import { activityTimeline } from "@/lib/activity";
 import { isAiConfigured } from "@/lib/ai/config";
-import { editsSchema, matchSchema, matchScore } from "@/lib/application-data";
+import { editsSchema, matchSchema, matchScore, unitsSchema } from "@/lib/application-data";
 import { loadApplication, loadDocuments, readJson } from "@/lib/application-documents";
+import { DocumentProposalStatus } from "@/generated/prisma/enums";
+import { proposalSourceContextSchema } from "@/lib/connector/proposals";
+import { prisma } from "@/lib/prisma";
 import { formatShortDate } from "@/lib/dates";
 import { resolveFileName } from "@/lib/file-name";
 import { refineJobKey } from "@/lib/jobs/refine";
@@ -26,6 +30,7 @@ import { loadThemes } from "@/lib/theme-data";
 import { userTimeZone } from "@/lib/time-zone";
 
 import { ApplicationView } from "./application-view";
+import type { DocumentProposalView } from "./document-proposal-review";
 import { metaLine } from "./meta";
 import { tabFrom } from "./tabs";
 
@@ -47,7 +52,7 @@ export async function generateMetadata({ params }: PageProps<"/applications/[id]
 export default async function ApplicationPage({ params, searchParams }: PageProps<"/applications/[id]">) {
   const [{ id }, { tab }] = await Promise.all([params, searchParams]);
   await pullCalendar(id);
-  const [{ application, profile, liveProfile, sent, settings, extracted, resume, letter, email, includeReferences, sections, ownSections, letterDate }, aiReady, unitJobs, refineJobs, emailJobs, timeZone, google, emails, themes, resumeJobs, letterJobs, scoreJobs] =
+  const [{ application, profile, liveProfile, sent, settings, extracted, resume, letter, email, includeReferences, sections, ownSections, letterDate }, aiReady, unitJobs, refineJobs, emailJobs, timeZone, google, emails, themes, resumeJobs, letterJobs, scoreJobs, proposalRows] =
     await Promise.all([
       loadDocuments(id),
       isAiConfigured(),
@@ -61,7 +66,21 @@ export default async function ApplicationPage({ params, searchParams }: PageProp
       findUnfinishedJobs(writeDocumentJobKey(id, "RESUME")),
       findUnfinishedJobs(writeDocumentJobKey(id, "COVER_LETTER")),
       findUnfinishedJobs(scoreResumeJobKey(id)),
+      prisma.documentProposal.findMany({
+        where: { applicationId: id, status: DocumentProposalStatus.PENDING },
+        include: { document: { select: { kind: true, units: true } } },
+        orderBy: { createdAt: "asc" },
+      }),
     ]);
+  const proposals: DocumentProposalView[] = proposalRows.map((proposal) => ({
+    id: proposal.id,
+    kind: proposal.document.kind,
+    currentUnits: unitsSchema.parse(proposal.document.units),
+    proposedUnits: unitsSchema.parse(proposal.proposedUnits),
+    sourceContext: proposalSourceContextSchema.parse(proposal.sourceContext),
+    warnings: z.array(z.string()).parse(proposal.warnings),
+    createdAt: proposal.createdAt.toISOString(),
+  }));
 
   const match = readJson(matchSchema, application.match);
   const messages = application.messages
@@ -117,6 +136,7 @@ export default async function ApplicationPage({ params, searchParams }: PageProp
       meta={metaLine(application)}
       resume={resume}
       letter={letter}
+      proposals={proposals}
       themes={themes}
       baseThemeId={settings.baseThemeId}
       email={email}

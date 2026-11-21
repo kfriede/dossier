@@ -12,6 +12,7 @@ import { readPostingJob } from "@/lib/jobs/read-posting";
 import { scorePastedPostingJob } from "@/lib/jobs/score-posting";
 import { startJob } from "@/lib/jobs/runner";
 import { writeDocumentsJob } from "@/lib/jobs/write-documents";
+import { resumeFamilySchema } from "@/lib/resume-families";
 import { fetchPosting } from "@/lib/posting-fetch";
 import { prisma } from "@/lib/prisma";
 
@@ -72,8 +73,9 @@ export const startWritingDocuments = action(
     tone: z.enum(Tone),
     note: z.string().trim().max(2000),
     write: z.enum(DOCUMENTS_TO_WRITE).default("both"),
+    resumeFamily: resumeFamilySchema.default("general"),
   }),
-  async ({ readJobId, details, match, tone, note, write }) => {
+  async ({ readJobId, details, match, tone, note, write, resumeFamily }) => {
     const reading = await finishedReading(readJobId);
     const orNull = (value: string) => value || null;
     const extracted = {
@@ -86,7 +88,7 @@ export const startWritingDocuments = action(
       salary: orNull(details.salary),
       deadline: orNull(details.deadline),
     };
-    return startJob(writeDocumentsJob, { readJobId, posting: reading.input.posting, extracted, match, tone, note, write });
+    return startJob(writeDocumentsJob, { readJobId, posting: reading.input.posting, extracted, match, tone, note, write, resumeFamily });
   },
 );
 
@@ -153,6 +155,7 @@ export const createApplication = action(
       postingUrl: postingLink(postingUrl),
       tone: input.tone,
       note: input.note,
+      resumeFamily: input.resumeFamily,
       claim: { kind: "manual", writeJobId, readJobId: input.readJobId, postingId: postingId ?? null, startupId: startupId ?? null },
     });
   },

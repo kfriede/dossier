@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Switch } from "radix-ui";
-import { useEffect, useId, useOptimistic, useRef, useState, useTransition } from "react";
+import { useEffect, useId, useOptimistic, useRef, useState, useTransition, type ReactNode } from "react";
 
 import { plainUnit, type UnitRenderer } from "@/components/documents/document-page";
 import { DocumentPreview } from "@/components/documents/document-preview";
@@ -79,6 +79,8 @@ import { TrimmedNotice } from "./trimmed-notice";
 import { aboutWords, type Tab } from "./tabs";
 import { UnitFrame } from "./unit-frame";
 import { VersionHistory, type ViewedVersion } from "./version-history";
+import { DocumentProposalReview, type DocumentProposalView } from "./document-proposal-review";
+import { RecipientHandoff } from "./recipient-handoff";
 import type { EmailView } from "@/lib/google/inbox-data";
 
 
@@ -140,6 +142,7 @@ export type ApplicationViewProps = {
   meta: string[];
   resume: DocumentData | null;
   letter: DocumentData | null;
+  proposals?: DocumentProposalView[];
   /** Every theme, for the Theme menu (#226), and which is the base theme. */
   themes: ThemeData[];
   baseThemeId: string;
@@ -203,6 +206,7 @@ export function ApplicationView({
   activity,
   resume,
   letter,
+  proposals = [],
   themes,
   baseThemeId,
   sections,
@@ -654,6 +658,16 @@ export function ApplicationView({
     </div>
   );
   const viewed = (document: DocumentKind) => (viewing?.document === document ? viewing : null);
+  const proposalNotice = (kind: DocumentKind, notice?: ReactNode) => {
+    const pendingProposals = proposals.filter((proposal) => proposal.kind === kind);
+    if (pendingProposals.length === 0) return notice;
+    return (
+      <div className="flex flex-col gap-4">
+        <DocumentProposalReview applicationId={application.id} proposals={pendingProposals} />
+        {notice}
+      </div>
+    );
+  };
   const notes = activity.filter((entry) => entry.kind === "note").length;
   const waiting = gmail?.emails.filter((email) => email.direction === "INCOMING" && !email.handled).length ?? 0;
 
@@ -692,6 +706,7 @@ export function ApplicationView({
               </Link>
             )}
             <StatusControl id={application.id} status={application.status} interviewAt={application.nextInterviewAt} timeZone={timeZone} />
+            {(resume || letter) && <RecipientHandoff applicationIds={[application.id]} />}
             {(resume || letter) && (
               // The document on screen; from the Job posting tab, the resume (E8-8).
               <DownloadPdfButton
@@ -726,13 +741,14 @@ export function ApplicationView({
           {resume && resumeTheme && resumeUnits ? (
             <DocumentPreview
               meta={viewed(DocumentKind.RESUME) ? undefined : hint}
-              notice={
+              notice={proposalNotice(
+                DocumentKind.RESUME,
                 viewed(DocumentKind.RESUME) ? (
                   versionBanner(viewed(DocumentKind.RESUME)!)
                 ) : resume.trimmed?.length ? (
                   <TrimmedNotice items={resume.trimmed} onPutBack={putBack} />
                 ) : undefined
-              }
+              )}
               label={
                 <span className="flex flex-wrap items-center gap-x-4 gap-y-1">
                   <span className="flex items-center gap-1">Tailored resume · {themeMenu(resumeTheme)}</span>
@@ -790,7 +806,10 @@ export function ApplicationView({
                 </span>
               }
               meta={viewed(DocumentKind.COVER_LETTER) ? undefined : hint}
-              notice={viewed(DocumentKind.COVER_LETTER) ? versionBanner(viewed(DocumentKind.COVER_LETTER)!) : undefined}
+              notice={proposalNotice(
+                DocumentKind.COVER_LETTER,
+                viewed(DocumentKind.COVER_LETTER) ? versionBanner(viewed(DocumentKind.COVER_LETTER)!) : undefined,
+              )}
             >
               <TailoredLetter
                 letter={{ ...letter, theme: letterTheme, units: viewed(DocumentKind.COVER_LETTER)?.units ?? letterUnits }}
@@ -935,4 +954,3 @@ function PreviewSwitch({ label, checked, onCheckedChange }: { label: string; che
     </span>
   );
 }
-

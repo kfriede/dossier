@@ -1,9 +1,11 @@
 import "server-only";
 
+import { PostingSource } from "@/generated/prisma/enums";
 import type { Posting, Prisma } from "@/generated/prisma/client";
-import { linkKey, postingKey, type FoundPosting, type JobSource, type PostingState, type ShownPosting } from "@/lib/job-search/search";
+import { linkKey, postingKey, type FoundPosting, type PostingState, type ShownStoredPosting, type StoredPosting } from "@/lib/job-search/search";
 import { stringsOf } from "@/lib/agent/candidates";
 import { prisma } from "@/lib/prisma";
+import { evidenceMatchSchema } from "@/lib/scoring/evidence";
 
 // Postings kept from Find jobs (E14-5): saved, dismissed, or started an
 // application from. Nothing else from a search is stored, and a posting
@@ -11,7 +13,7 @@ import { prisma } from "@/lib/prisma";
 
 export type { PostingState };
 
-type PostingRef = { source: JobSource; externalId: string };
+type PostingRef = { source: PostingSource; externalId: string };
 
 const whereRef = ({ source, externalId }: PostingRef) => ({ source_externalId: { source, externalId } });
 
@@ -32,6 +34,7 @@ function fieldsOf(found: FoundPosting) {
 
 /** A stored posting in the shape search results have. */
 export function foundFromPosting(posting: Posting): FoundPosting {
+  if (posting.source === PostingSource.IMPORTED) throw new Error("Imported postings are not provider search results.");
   return {
     source: posting.source,
     externalId: posting.externalId,
@@ -46,6 +49,36 @@ export function foundFromPosting(posting: Posting): FoundPosting {
     description: posting.description,
     complete: posting.complete,
   };
+}
+
+/** A stored row in the Saved or Dismissed view, with imported provenance kept separate from provider data. */
+export function storedPostingFromRow(posting: Posting): StoredPosting {
+  const found = {
+    externalId: posting.externalId,
+    title: posting.title,
+    company: posting.company,
+    place: posting.place,
+    remote: posting.remote,
+    salary: posting.salary,
+    postedAt: posting.postedAt?.toISOString() ?? null,
+    url: posting.url,
+    via: posting.via,
+    description: posting.description,
+    complete: posting.complete,
+  };
+  if (posting.source === PostingSource.IMPORTED) {
+    return {
+      ...found,
+      source: PostingSource.IMPORTED,
+      requisitionId: posting.requisitionId,
+      sourceKind: posting.sourceKind ?? "",
+      sourceUrl: posting.sourceUrl ?? "",
+      reportedRetrievedAt: posting.reportedRetrievedAt?.toISOString() ?? null,
+      reportedCheckedAt: posting.reportedCheckedAt?.toISOString() ?? null,
+      researchNotes: posting.researchNotes ?? "",
+    };
+  }
+  return { ...found, source: posting.source };
 }
 
 /**
@@ -93,15 +126,28 @@ export async function unmarkPosting(ref: PostingRef, mark: "saved" | "dismissed"
   });
 }
 
+/** Changes an imported posting's list state without trusting browser-supplied posting content. */
+export async function markImportedPosting(ref: PostingRef, mark: "saved" | "dismissed"): Promise<{ id: string; wasSaved: boolean } | null> {
+  const where = whereRef(ref);
+  const existing = await prisma.posting.findUnique({ where, select: { id: true, source: true, savedAt: true } });
+  if (!existing || existing.source !== PostingSource.IMPORTED) return null;
+  const updated = await prisma.posting.update({
+    where,
+    data: mark === "saved" ? { savedAt: new Date(), dismissedAt: null } : { dismissedAt: new Date(), savedAt: null },
+    select: { id: true },
+  });
+  return { id: updated.id, wasSaved: Boolean(existing.savedAt) };
+}
+
 /** The Saved or Dismissed view (E14-7): newest first, with where each stands. */
-export async function listPostings(view: "saved" | "dismissed"): Promise<ShownPosting[]> {
+export async function listPostings(view: "saved" | "dismissed"): Promise<ShownStoredPosting[]> {
   const rows = await prisma.posting.findMany({
     where: view === "saved" ? { savedAt: { not: null } } : { dismissedAt: { not: null } },
     orderBy: view === "saved" ? { savedAt: "desc" } : { dismissedAt: "desc" },
   });
-  const states = await postingStates(rows.map(foundFromPosting));
+  const states = await postingStates(rows.map(({ source, externalId, url }) => ({ source, externalId, url })));
   return rows.map((row) => {
-    const found = foundFromPosting(row);
+    const found = storedPostingFromRow(row);
     return { ...found, state: states.get(postingKey(found))! };
   });
 }
@@ -132,7 +178,10 @@ export async function postingStates(found: readonly (PostingRef & { url: string 
     db.application.findMany({ where: { postingUrl: { not: "" }, awaitingReview: false }, select: { id: true, postingUrl: true }, orderBy: { createdAt: "asc" } }),
     db.postingScore.findMany({ where: { OR: refs } }),
   ]);
-  const scoreOf = new Map(scores.map((row) => [postingKey(row), { score: row.score, reasons: stringsOf(row.reasons), redFlags: stringsOf(row.redFlags) }]));
+  const scoreOf = new Map(scores.map((row) => {
+    const parsed = evidenceMatchSchema.safeParse(row.evidence);
+    return [postingKey(row), { score: row.score, reasons: stringsOf(row.reasons), redFlags: stringsOf(row.redFlags), ...(parsed.success ? { evidence: parsed.data } : {}) }] as const;
+  }));
   const byKey = new Map(stored.map((posting) => [postingKey(posting), posting]));
   const byLink = new Map<string, string>();
   for (const application of applications) {

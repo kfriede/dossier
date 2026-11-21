@@ -65,6 +65,21 @@ describe("zipPdfsJob (E10-5)", () => {
     expect(await countTailoredDocuments()).toBe(5);
   });
 
+  it("exports only the selected application's resume and cover letter for a recipient", async () => {
+    const result = await zipPdfsJob.run({ applicationIds: ["a1"] }, context);
+    expect(result).toMatchObject({ documents: 2, fileName: expect.stringMatching(/^dossier-handoff-\d{4}-\d{2}-\d{2}\.zip$/) });
+    expect(renderPdf).toHaveBeenCalledTimes(2);
+    const zip = unzipSync(await readFile(path.join(dataDir.path, "downloads", result.file)));
+    expect(Object.keys(zip)).toEqual([
+      "Ledgerly/Jane Doe – Ledgerly – Cover letter.pdf",
+      "Ledgerly/Jane Doe – Ledgerly – Resume.pdf",
+    ]);
+  });
+
+  it("does not produce a success-shaped empty handoff", async () => {
+    await expect(zipPdfsJob.run({ applicationIds: ["a4"] }, context)).rejects.toThrow("no longer have recipient documents");
+  });
+
   it("clears out zips nobody collected", async () => {
     const first = await zipPdfsJob.run({}, context);
     vi.useFakeTimers({ now: Date.now() + 2 * 60 * 60 * 1000, toFake: ["Date"] });

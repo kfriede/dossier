@@ -3,7 +3,8 @@ import "server-only";
 import { McpServer, type CallToolResult } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
-import { ApplicationStatus, DocumentKind } from "@/generated/prisma/enums";
+import type { Prisma } from "@/generated/prisma/client";
+import { ApplicationStatus, DocumentKind, PostingSource } from "@/generated/prisma/enums";
 import { approveCandidate } from "@/lib/agent/draft";
 import { isAiUsable } from "@/lib/ai/config";
 import { profileForPrompt } from "@/lib/ai/tasks/prompt-parts";
@@ -18,7 +19,11 @@ import { withoutPrivateParts } from "@/lib/letter-frame";
 import { fetchPosting } from "@/lib/posting-fetch";
 import { saveScore } from "@/lib/posting-scores";
 import { loadSearch, runSearch, showMoreFor } from "@/lib/posting-searches";
-import { foundFromPosting, storePosting } from "@/lib/postings";
+import { foundFromPosting, storePosting, storedPostingFromRow } from "@/lib/postings";
+import { IdempotencyConflictError, idempotentWrite, readIdempotentResult } from "@/lib/connector/idempotency";
+import { DocumentProposalConflictError, createDocumentProposal, documentProposalInputSchema } from "@/lib/connector/proposals";
+import { documentRevision, postingRevision } from "@/lib/connector/revisions";
+import { importPostings, importedPostingBatchSchema } from "@/lib/imported-postings";
 import { prisma } from "@/lib/prisma";
 import { loadProfile } from "@/lib/profile-data";
 import { withoutSectionsOff } from "@/lib/resume-sections";
@@ -29,7 +34,17 @@ import { appVersion } from "@/lib/version";
 
 import { connectorDraftJob } from "./draft";
 import { readPastedPosting } from "./handoff";
-import { saveWrittenApplication, WRITTEN_IN_CLAUDE, writtenDetailsSchema, writtenLetterSchema, writtenMatchSchema, writtenResumeSchema } from "./write";
+import {
+  InvalidProfileReferenceError,
+  ProfileRevisionConflictError,
+  profileRevision,
+  saveWrittenApplication,
+  WRITTEN_IN_CLAUDE,
+  writtenDetailsSchema,
+  writtenLetterSchema,
+  writtenMatchSchema,
+  writtenResumeSchema,
+} from "./write";
 
 // The Claude connector's tools (#221, src/app/api/mcp), adapted from Anirudh
 // Sharma's fork of Dossier: search for jobs, read the profile and the
@@ -82,23 +97,85 @@ const postingSource = {
   posting_text: z.string().max(100_000).optional().describe("The posting's text, pasted"),
 };
 
-type PostingSource = { posting_id?: string; paste_id?: string; search_id?: string; number?: number; posting_url?: string; posting_text?: string };
-type ResolvedPosting = { text: string; url: string; postingId: string | null; title?: string; company?: string; place?: string };
+type PostingSourceInput = { posting_id?: string; paste_id?: string; search_id?: string; number?: number; posting_url?: string; posting_text?: string };
+type ResolvedPosting = {
+  text: string;
+  url: string;
+  postingId: string | null;
+  revision: string;
+  complete: boolean;
+  source: string;
+  sourceContext?: { kind: string; url: string; retrievedAt: string | null; checkedAt: string | null; verified: false };
+  recordUpdatedAt?: Date;
+  title?: string;
+  company?: string;
+  place?: string;
+};
+type SaveApplicationResult = Prisma.InputJsonObject & {
+  application_id: string;
+  check_these: (Prisma.InputJsonObject & { part: string; items: string[] })[];
+  warnings: string[];
+};
+
+class PostingRevisionConflictError extends Error {
+  constructor() {
+    super("The posting changed after it was read. Read it again before saving this application.");
+    this.name = "PostingRevisionConflictError";
+  }
+}
 
 /** The whole text of a posting from a search, one handed over, a link or pasted text, or what's wrong. */
-async function resolvePosting(source: PostingSource): Promise<ResolvedPosting | { error: string }> {
+async function resolvePosting(source: PostingSourceInput): Promise<ResolvedPosting | { error: string }> {
   if (source.posting_id) {
     const row = await prisma.posting.findUnique({ where: { id: source.posting_id } });
     if (!row) return { error: "That posting is no longer in Dossier. Open it again from Find jobs." };
+    if (row.source === PostingSource.IMPORTED) {
+      const description = row.description;
+      const text = postingText({ title: row.title, company: row.company, place: row.place, remote: row.remote, salary: row.salary, description });
+      return {
+        text,
+        url: row.url,
+        postingId: row.id,
+        revision: postingRevision({
+          text,
+          url: row.url,
+          source: "imported",
+          complete: row.complete,
+          title: row.title,
+          company: row.company,
+          place: row.place,
+          sourceContext: { kind: row.sourceKind ?? "Unspecified", url: row.sourceUrl ?? "", retrievedAt: row.reportedRetrievedAt?.toISOString() ?? null, checkedAt: row.reportedCheckedAt?.toISOString() ?? null, verified: false },
+        }),
+        complete: row.complete,
+        source: "imported",
+        recordUpdatedAt: row.updatedAt,
+        sourceContext: { kind: row.sourceKind ?? "Unspecified", url: row.sourceUrl ?? "", retrievedAt: row.reportedRetrievedAt?.toISOString() ?? null, checkedAt: row.reportedCheckedAt?.toISOString() ?? null, verified: false },
+        title: row.title,
+        company: row.company,
+        place: row.place,
+      };
+    }
     const found = foundFromPosting(row);
     const description = found.complete ? found.description : ((await fullText(found)) ?? found.description);
     if (!description.trim()) return { error: "That posting has no text to write from. Give its link as posting_url instead." };
-    return { text: postingText({ ...found, description }), url: found.url, postingId: row.id, title: found.title, company: found.company, place: found.place };
+    const text = postingText({ ...found, description });
+    return {
+      text,
+      url: found.url,
+      postingId: row.id,
+      revision: postingRevision({ text, url: found.url, source: row.source, title: found.title, company: found.company, place: found.place, complete: found.complete }),
+      complete: found.complete,
+      source: row.source,
+      recordUpdatedAt: row.updatedAt,
+      title: found.title,
+      company: found.company,
+      place: found.place,
+    };
   }
   if (source.paste_id) {
     const pasted = await readPastedPosting(source.paste_id);
     if (!pasted) return { error: "That pasted posting is no longer kept. Paste it into New application again, or here as posting_text." };
-    return { text: pasted.text, url: pasted.url, postingId: null };
+    return { text: pasted.text, url: pasted.url, postingId: null, revision: postingRevision({ text: pasted.text, url: pasted.url, source: "pasted", complete: true }), complete: true, source: "pasted" };
   }
   if (source.search_id) {
     const search = await prisma.postingSearch.findUnique({ where: { id: source.search_id }, select: { postings: true } });
@@ -107,27 +184,36 @@ async function resolvePosting(source: PostingSource): Promise<ResolvedPosting | 
     if (!found) return { error: "There's no such posting in that search. Use a number from search_jobs." };
     const description = (await fullText(found)) ?? found.description;
     if (!description.trim()) return { error: "That posting has no text to write from. Give its link as posting_url instead." };
+    const stored = await storePosting(found);
+    const text = postingText({ ...found, description });
     return {
-      text: postingText({ ...found, description }),
+      text,
       url: found.url,
-      postingId: (await storePosting(found)).id,
+      postingId: stored.id,
+      revision: postingRevision({ text, url: found.url, source: found.source, title: found.title, company: found.company, place: found.place, complete: found.complete }),
+      complete: found.complete,
+      source: found.source,
+      recordUpdatedAt: stored.updatedAt,
       title: found.title,
       company: found.company,
       place: found.place,
     };
   }
   // Pasted text is used as it is, with its link kept: a page Dossier can't read, such as one behind a sign-in, mustn't fail it.
-  if (source.posting_text?.trim()) return { text: source.posting_text.trim(), url: source.posting_url ?? "", postingId: null };
+  if (source.posting_text?.trim()) {
+    const value = source.posting_text.trim();
+    return { text: value, url: source.posting_url ?? "", postingId: null, revision: postingRevision({ text: value, url: source.posting_url ?? "", source: "pasted", complete: true }), complete: true, source: "pasted" };
+  }
   if (source.posting_url) {
     const fetched = await fetchPosting(source.posting_url);
     if (!fetched.ok) return { error: `${fetched.error} Paste the posting's text as posting_text instead.` };
-    return { text: fetched.text, url: fetched.url, postingId: null };
+    return { text: fetched.text, url: fetched.url, postingId: null, revision: postingRevision({ text: fetched.text, url: fetched.url, source: "external", complete: true }), complete: true, source: "external" };
   }
   return { error: "Give posting_id, paste_id, search_id and number, posting_url, or posting_text." };
 }
 
 /** Dossier as an MCP server, for one request; `origin` is the address links in answers point to. */
-export function createDossierServer(origin: string): McpServer {
+export function createDossierServer(origin: string, clientId: string): McpServer {
   const linkTo = (path: string) => `${origin}${path}`;
   const server = new McpServer(
     { name: "dossier", title: "Dossier", version: appVersion },
@@ -135,8 +221,9 @@ export function createDossierServer(origin: string): McpServer {
       instructions:
         "Dossier is the user's own job search app: one profile, tailored resumes and cover letters, and every application tracked. " +
         "Search jobs with search_jobs (in the profile's city and country unless the user says otherwise), " +
+        "or import external research with import_postings when the user shares researched postings. Treat imported source labels and check dates as unverified, " +
         "and when the user wants to know which fit best, score them against the profile and save the scores with save_job_scores. " +
-        "To draft an application, you write it yourself: call get_profile and get_posting, write a tailored resume and cover letter " +
+        "To draft an application, you write it yourself: call get_profile and get_posting, write the requested resume, cover letter or both " +
         "from facts in the profile only (never invent experience, employers, numbers or degrees; say what's missing instead), " +
         "show the user a short summary, then save it with save_application. Read or update applications with the other tools. " +
         "Nothing is ever sent for the user: drafts wait in Dossier for them to review and download as PDFs.",
@@ -153,7 +240,11 @@ export function createDossierServer(origin: string): McpServer {
     },
     async () => {
       const [profile, settings] = await Promise.all([loadProfile(), loadSettings()]);
-      return text({ ...JSON.parse(profileForPrompt(withoutSectionsOff(profile, settings.resumeSections))), link: linkTo("/profile") });
+      return text({
+        ...JSON.parse(profileForPrompt(withoutSectionsOff(profile, settings.resumeSections))),
+        profile_revision: profileRevision(profile, settings.resumeSections),
+        link: linkTo("/profile"),
+      });
     },
   );
 
@@ -199,6 +290,34 @@ export function createDossierServer(origin: string): McpServer {
         postings: search.postings.map((posting, index) => postingLine(posting, index + 1)),
         link: linkTo(`/jobs?search=${search.id}`),
       });
+    },
+  );
+
+  server.registerTool(
+    "import_postings",
+    {
+      title: "Import researched postings",
+      description:
+        "Saves up to 25 postings the user has already researched into Find jobs → Saved. " +
+        "Supply an idempotency_key and each posting's title, company, source_kind, posting_text, and completeness. " +
+        "Optional source links, requisition IDs, retrieval/check timestamps and notes are stored as reported context, not verified facts. " +
+        "Dossier does not fetch these links or contact job sources. Reuse the same key only for an exact retry; receipts are kept for 30 days. " +
+        "If a posting differs from an existing copy, Dossier leaves the saved version unchanged and returns needs_review.",
+      inputSchema: importedPostingBatchSchema,
+      annotations: { readOnlyHint: false, openWorldHint: false, idempotentHint: true },
+    },
+    async (input) => {
+      if (!clientId) return failure("This write requires an authenticated Dossier connector.");
+      let outcome: Awaited<ReturnType<typeof importPostings>>;
+      try {
+        outcome = await importPostings(clientId, input);
+      } catch (error) {
+        if (error instanceof IdempotencyConflictError) return failure(error.message);
+        throw error;
+      }
+      const { result, replayed } = outcome;
+      const response = { ...result, replayed, provenance_warning: "Source labels and source-check timestamps were reported by the importing client and have not been verified." };
+      return text(response);
     },
   );
 
@@ -260,7 +379,7 @@ export function createDossierServer(origin: string): McpServer {
       const missing: (number | string)[] = [];
       for (const entry of scores) {
         const row = entry.posting_id ? await prisma.posting.findUnique({ where: { id: entry.posting_id } }) : null;
-        const posting = row ? foundFromPosting(row) : entry.number ? kept[entry.number - 1] : undefined;
+        const posting = row ? storedPostingFromRow(row) : entry.number ? kept[entry.number - 1] : undefined;
         if (!posting) {
           missing.push(entry.posting_id ?? entry.number ?? "?");
           continue;
@@ -331,7 +450,7 @@ export function createDossierServer(origin: string): McpServer {
           postingUrl: true,
           postingText: true,
           match: true,
-          documents: { select: { kind: true, units: true } },
+          documents: { select: { id: true, kind: true, units: true, updatedAt: true } },
         },
       });
       if (!application) return failure("That application no longer exists.");
@@ -350,8 +469,53 @@ export function createDossierServer(origin: string): McpServer {
         match: application.match,
         resume: doc(DocumentKind.RESUME),
         cover_letter: doc(DocumentKind.COVER_LETTER),
+        document_revisions: application.documents.map((document) => ({
+          kind: document.kind,
+          document_revision: documentRevision(document),
+        })),
         link: linkTo(`/applications/${application.id}`),
       });
+    },
+  );
+
+  server.registerTool(
+    "propose_document_revision",
+    {
+      title: "Propose a document revision",
+      description:
+        "Stores a resume or cover-letter revision for the user to review in Dossier. " +
+        "Pass the document_revision from get_application and profile_revision from get_profile. " +
+        "This creates a pending proposal only; it does not change the document, application status, or sent copy. " +
+        "The user must approve or reject it in Dossier.",
+      inputSchema: z.object({
+        ...documentProposalInputSchema.shape,
+        idempotency_key: z.string().trim().min(1).max(200).describe("Unique key for retrying this exact proposal"),
+      }),
+      annotations: { readOnlyHint: false, openWorldHint: false, idempotentHint: true },
+    },
+    async ({ idempotency_key, ...input }) => {
+      if (!clientId) return failure("This write requires an authenticated Dossier connector.");
+      try {
+        const saved = await idempotentWrite({
+          clientId,
+          operation: "propose_document_revision",
+          idempotencyKey: idempotency_key,
+          payload: input,
+          work: async (tx) => {
+            const result = await createDocumentProposal(tx, input);
+            return { proposal_id: result.proposalId, warnings: result.warnings };
+          },
+        });
+        return text({
+          ...saved.result,
+          status: "pending",
+          replayed: saved.replayed,
+          link: linkTo(`/applications/${input.application_id}`),
+        });
+      } catch (error) {
+        if (error instanceof IdempotencyConflictError || error instanceof DocumentProposalConflictError) return failure(error.message);
+        throw error;
+      }
     },
   );
 
@@ -360,20 +524,37 @@ export function createDossierServer(origin: string): McpServer {
     {
       title: "Read a posting",
       description:
-        "The whole text of a job posting, from a search (search_id and number), one Dossier handed over (posting_id or paste_id) or a link (posting_url), to write an application from or score.",
+        "Reads a posting from a search (search_id and number), one Dossier handed over (posting_id or paste_id), a link (posting_url) or pasted text (posting_text). Long text is returned in 16,000-character chunks; pass next_offset as offset to read more. The posting_revision token identifies the exact context returned.",
       inputSchema: z.object({
         posting_id: postingSource.posting_id,
         paste_id: postingSource.paste_id,
         search_id: postingSource.search_id,
         number: postingSource.number,
         posting_url: postingSource.posting_url,
+        posting_text: postingSource.posting_text,
+        offset: z.number().int().min(0).max(100_000).default(0).describe("Character offset for the next chunk from a previous get_posting result"),
       }),
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    async (input) => {
+    async ({ offset, ...input }) => {
       const posting = await resolvePosting(input);
       if ("error" in posting) return failure(posting.error);
-      return text({ url: posting.url || undefined, title: posting.title, company: posting.company, place: posting.place, text: posting.text });
+      if (offset > posting.text.length) return failure("That offset is past the end of this posting. Read it again from offset 0.");
+      const end = Math.min(offset + 16_000, posting.text.length);
+      return text({
+        url: posting.url || undefined,
+        title: posting.title,
+        company: posting.company,
+        place: posting.place,
+        source: posting.source,
+        complete: posting.complete,
+        source_context: posting.sourceContext,
+        posting_revision: posting.revision,
+        offset,
+        total_characters: posting.text.length,
+        next_offset: end < posting.text.length ? end : undefined,
+        text: posting.text.slice(offset, end),
+      });
     },
   );
 
@@ -382,39 +563,99 @@ export function createDossierServer(origin: string): McpServer {
     {
       title: "Save an application you wrote",
       description:
-        "Saves a tailored resume and cover letter you wrote as a Draft application in Dossier, where the user can review, edit and download them as PDFs. " +
-        "Give the posting (posting_id or paste_id when Dossier handed it over, search_id and number, posting_url or posting_text), its details, the resume (by the ids from get_profile) and the letter. " +
-        "Only use facts from the profile. Nothing is sent.",
+        "Saves the resume, cover letter, or both that you wrote as a Draft application in Dossier, where the user can review, edit and download them as PDFs. " +
+        "Give the profile_revision from get_profile and posting_revision from get_posting. Resume role, project, and education ids must still exist in the current profile. " +
+        "Supply an idempotency_key for safe retries. Only use facts from the profile. Nothing is sent.",
       inputSchema: z.object({
         ...postingSource,
+        idempotency_key: z.string().trim().min(1).max(200).describe("Unique key for retrying this exact save"),
+        profile_revision: z.string().min(1).max(200).describe("The profile_revision returned by get_profile"),
+        posting_revision: z.string().min(1).max(200).describe("The posting_revision returned by get_posting"),
         details: writtenDetailsSchema,
-        resume: writtenResumeSchema,
-        cover_letter: writtenLetterSchema,
+        resume: writtenResumeSchema.optional(),
+        cover_letter: writtenLetterSchema.optional(),
         match: writtenMatchSchema.describe("What the posting asks for and whether the profile covers it, partly covers it, or has a gap; Dossier shows it as the application's match"),
         note: z.string().max(2000).optional().describe("What the user asked to stress, kept with the application"),
       }),
       annotations: { readOnlyHint: false, openWorldHint: true },
     },
-    async ({ details, resume, cover_letter, match, note, ...source }) => {
-      const posting = await resolvePosting(source);
-      if ("error" in posting) return failure(posting.error);
-      const saved = await saveWrittenApplication({
-        posting: posting.text.slice(0, 100_000),
-        postingUrl: posting.url.slice(0, 2000),
-        postingId: posting.postingId,
-        details,
-        resume,
-        letter: cover_letter,
-        match,
-        note: note ?? "",
-      });
-      return text({
-        application_id: saved.applicationId,
-        status: "Draft",
-        link: linkTo(`/applications/${saved.applicationId}`),
-        check_these: saved.unverified.length > 0 ? saved.unverified : undefined,
-        next: saved.unverified.length > 0 ? "Dossier marked names or numbers it couldn't find in the profile or posting; tell the user to check them." : undefined,
-      });
+    async ({ details, resume, cover_letter, match, note, idempotency_key, profile_revision, posting_revision, ...source }) => {
+      if (!clientId) return failure("This write requires an authenticated Dossier connector.");
+      if (!resume && !cover_letter) return failure("Provide a resume, a cover letter, or both.");
+      const payload = { source, details, resume, cover_letter, match, note: note ?? "", profile_revision, posting_revision };
+      try {
+        const replay = await readIdempotentResult<SaveApplicationResult>({
+          clientId,
+          operation: "save_application",
+          idempotencyKey: idempotency_key,
+          payload,
+        });
+        if (replay) {
+          return text({
+            ...replay.result,
+            status: "Draft",
+            replayed: true,
+            link: linkTo(`/applications/${replay.result.application_id}`),
+            next: replay.result.check_these.length > 0 ? "Dossier marked names or numbers it couldn't find in the profile or posting; tell the user to check them." : undefined,
+          });
+        }
+
+        const posting = await resolvePosting(source);
+        if ("error" in posting) return failure(posting.error);
+        if (posting.revision !== posting_revision) return failure("The posting changed after it was read. Read it again before saving this application.");
+
+        const saved = await idempotentWrite<SaveApplicationResult>({
+          clientId,
+          operation: "save_application",
+          idempotencyKey: idempotency_key,
+          payload,
+          work: async (tx) => {
+            if (posting.postingId && posting.recordUpdatedAt) {
+              const pinned = await tx.posting.updateMany({
+                where: { id: posting.postingId, updatedAt: posting.recordUpdatedAt },
+                data: { updatedAt: posting.recordUpdatedAt },
+              });
+              if (pinned.count !== 1) throw new PostingRevisionConflictError();
+            }
+            const result = await saveWrittenApplication({
+              posting: posting.text.slice(0, 100_000),
+              postingUrl: posting.url.slice(0, 2000),
+              postingId: posting.postingId,
+              details,
+              resume,
+              letter: cover_letter,
+              match,
+              note: note ?? "",
+            }, profile_revision, tx);
+            return {
+              application_id: result.applicationId,
+              check_these: result.unverified,
+              warnings: [
+                ...(!posting.complete ? ["The posting text is marked incomplete; verify fit and claims before using the documents."] : []),
+                ...(posting.sourceContext ? ["The imported source details were reported by the connector and have not been verified."] : []),
+              ],
+            };
+          },
+        });
+        const result = saved.result;
+        return text({
+          ...result,
+          status: "Draft",
+          replayed: saved.replayed,
+          link: linkTo(`/applications/${result.application_id}`),
+          next: result.check_these.length > 0 ? "Dossier marked names or numbers it couldn't find in the profile or posting; tell the user to check them." : undefined,
+        });
+      } catch (error) {
+        if (
+          error instanceof IdempotencyConflictError ||
+          error instanceof ProfileRevisionConflictError ||
+          error instanceof InvalidProfileReferenceError ||
+          error instanceof PostingRevisionConflictError
+        ) {
+          return failure(error.message);
+        }
+        throw error;
+      }
     },
   );
 

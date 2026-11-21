@@ -11,6 +11,7 @@ export function FitDetails({ fit }: { fit: PostingFit }) {
         <p className="font-medium">
           {fitBand(fit.score)} · {fit.score} of 100
         </p>
+        {fit.evidence && <p className="text-meta text-muted">Confirmed requirements only; unresolved items need your review.</p>}
         {fit.reasons.length > 0 && (
           <ul aria-label="Why it fits" className="flex list-disc flex-col gap-0.5 pl-5 text-muted">
             {fit.reasons.map((reason, index) => (
@@ -25,6 +26,14 @@ export function FitDetails({ fit }: { fit: PostingFit }) {
               {fit.redFlags.map((flag, index) => (
                 <li key={index}>{flag}</li>
               ))}
+            </ul>
+          </div>
+        )}
+        {(fit.evidence?.questions.length ?? 0) > 0 && (
+          <div className="text-meta text-muted">
+            <p className="font-medium">Questions for you</p>
+            <ul className="flex list-disc flex-col gap-0.5 pl-5">
+              {fit.evidence?.questions.map((question, index) => <li key={index}>{question}</li>)}
             </ul>
           </div>
         )}

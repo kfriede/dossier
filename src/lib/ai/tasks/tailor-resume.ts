@@ -5,6 +5,7 @@ import { publicationLabel } from "@/lib/citation";
 import { documentLabels, ENGLISH_LABELS, languagesLine, type DocumentLabels } from "@/lib/document-labels";
 import { customSectionUnits } from "@/lib/custom-section-units";
 import { certificationLabel, resumeCertifications, resumeCustomSections, resumePublications, sameName, type ProfileData } from "@/lib/profile";
+import { resumeFamilyFocus, resumeFamilySchema, type ResumeFamily } from "@/lib/resume-families";
 import { inEditorOrder, skillsText } from "@/lib/skill-groups";
 
 import { guardSources, guardUnits } from "../fact-guard";
@@ -23,7 +24,7 @@ import {
   type Task,
 } from "./prompt-parts";
 
-export const TAILOR_RESUME_VERSION = "tailor-resume@9";
+export const TAILOR_RESUME_VERSION = "tailor-resume@10";
 
 const answerSchema = z.object({
   summary: z.string(),
@@ -41,6 +42,7 @@ const INSTRUCTIONS = `You tailor a candidate's resume to one job, as JSON.
 - projects: every project from the profile, by id, with 1–3 bullets each, written like the roles' bullets: what was built and what it shows that this job cares about.
 - skills: the candidate's own skills, most relevant to this job first. Copy their names exactly; you may leave out ones that don't help.
 - education: every entry by id, with its notes shortened or left empty.
+- Prioritize the strongest supported evidence for the job's most important requirements across the summary, experience, projects and skills. Do not turn a gap into a claim.
 - The profile's certifications, publications and otherSections go on the resume word for word, so don't answer with them; the summary may mention them.`;
 
 export type TailorInput = {
@@ -53,14 +55,22 @@ export type TailorInput = {
   posting: string;
   /** Keep the profile's order of skills, set by hand, instead of the most relevant first (public issue 62). */
   keepSkillOrder?: boolean;
+  /** Role-family preset; it changes emphasis, never the source of facts. */
+  resumeFamily?: ResumeFamily;
 };
 
 /** APP-4: the tailored resume as units (summary, each role, each project, skills, each degree, each certification, each publication, languages). */
-export const tailorResume: Task<TailorInput, Unit[]> = async (provider, { profile, extracted, match, facts, posting, keepSkillOrder = false }, options) => {
+export const tailorResume: Task<TailorInput, Unit[]> = async (
+  provider,
+  { profile, extracted, match, facts, posting, keepSkillOrder = false, resumeFamily = "general" },
+  options,
+) => {
+  const family = resumeFamilySchema.parse(resumeFamily);
   const answer = await provider.complete({
     task: "tailor-resume",
     system: system(
       INSTRUCTIONS,
+      `Role-family emphasis: ${resumeFamilyFocus(family)}. Use only evidence already present in the candidate's profile and posting; do not add, infer, or strengthen claims to fit the family.`,
       truthfulness(options.strict),
       candidateFacts(profile, facts),
       CREATIVITY[options.creativity],

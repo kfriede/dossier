@@ -14,8 +14,10 @@ import type { ApplicationStatus } from "@/generated/prisma/enums";
 import type { ApplicationRow } from "@/lib/applications-data";
 import { FILTERS, listHref, statusesIn, type Filter, type ListParams, type View } from "@/lib/applications-list";
 import { cn } from "@/lib/cn";
+import { orderedQueue } from "@/lib/board-order";
 
-import { rememberListView, reorderBoard } from "./actions";
+import { rememberListView, reorderBoard, reorderQueue } from "./actions";
+import { ApplicationQueue } from "./application-queue";
 import { Board } from "./board";
 import { Table } from "./table";
 
@@ -35,6 +37,7 @@ export type ApplicationsScreenProps = {
 const HINTS: Record<View, string> = {
   board: "Drag a card to reorder it or change its status",
   table: "Click a row to open it",
+  queue: "Move applications to set your own priority order",
 };
 
 /** How long typing pauses before the search runs. */
@@ -59,17 +62,24 @@ export function ApplicationsScreen({ params, rows, counts, summary, empty, archi
 
   // A moved or reordered card shows in its new place at once; if the
   // change fails, it goes back (LST-4).
+  const listRows = params.view === "queue" ? orderedQueue(rows) : rows;
   const [shown, showMove] = useOptimistic(
-    rows,
+    listRows,
     (
       current,
-      change: { kind: "status"; id: string; to: ApplicationStatus } | { kind: "reorder"; ordered: ApplicationRow[] },
+      change:
+        | { kind: "status"; id: string; to: ApplicationStatus }
+        | { kind: "reorder"; ordered: ApplicationRow[] }
+        | { kind: "queue"; ordered: ApplicationRow[] },
     ) =>
       change.kind === "status"
         ? current.map((row) => (row.id === change.id ? { ...row, status: change.to, boardSort: null, updated: "Today", updatedAt: Date.now() } : row))
+        : change.kind === "queue"
+          ? change.ordered
         : current.map((row) => {
             const index = change.ordered.findIndex((entry) => entry.id === row.id);
-            return index < 0 ? row : { ...row, boardSort: index };
+            if (index < 0) return row;
+            return { ...row, boardSort: index };
           }),
   );
   const [, startMove] = useTransition();
@@ -83,6 +93,11 @@ export function ApplicationsScreen({ params, rows, counts, summary, empty, archi
     startMove(async () => {
       showMove({ kind: "reorder", ordered });
       toastResult(await reorderBoard({ status: ordered[0].status, ids: ordered.map((row) => row.id) }));
+    });
+  const reorderPriorityQueue = (ordered: ApplicationRow[]) =>
+    startMove(async () => {
+      showMove({ kind: "queue", ordered });
+      toastResult(await reorderQueue({ ids: ordered.map((row) => row.id) }));
     });
 
   // Each view, filter or sort gets its own history entry, so Back returns to
@@ -109,6 +124,8 @@ export function ApplicationsScreen({ params, rows, counts, summary, empty, archi
   // On the board the screen keeps to the window and each column scrolls on
   // its own; the table scrolls with the page.
   const board = !empty && rows.length > 0 && params.view === "board";
+  const queue = !empty && rows.length > 0 && params.view === "queue";
+  const queueRows = shown;
 
   return (
     <div className={cn("flex flex-col", board ? "h-panel min-h-[520px]" : "flex-1")}>
@@ -123,6 +140,7 @@ export function ApplicationsScreen({ params, rows, counts, summary, empty, archi
               options={[
                 { value: "board", label: "Board" },
                 { value: "table", label: "Table" },
+                { value: "queue", label: "Queue" },
               ]}
               value={params.view}
               onValueChange={(view) => go({ view })}
@@ -184,6 +202,8 @@ export function ApplicationsScreen({ params, rows, counts, summary, empty, archi
               <Nothing>{params.q ? `No applications match “${params.q}”.` : "Nothing in this view yet."}</Nothing>
             ) : board ? (
               <Board rows={shown} statuses={statusesIn(params.filter)} onMove={move} onReorder={reorder} />
+            ) : queue ? (
+              <ApplicationQueue rows={queueRows} onReorder={reorderPriorityQueue} />
             ) : (
               <Table rows={shown} sort={params.sort} onSort={(sort) => go({ sort })} onMove={move} />
             )}

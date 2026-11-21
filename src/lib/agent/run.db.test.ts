@@ -96,7 +96,11 @@ const posting = (id: string, title: string, posted: string, extra: Partial<Found
   postedAt: posted,
   url: `https://jobs.example/${id}?utm_source=x`,
   via: "LinkedIn",
-  description: `${title} at Company ${id}.`,
+  description: "Requirements:\n" + (/senior/i.test(title)
+    ? ["Figma", "Interaction design", "Design systems", "Prototyping", "User research", "Workshop facilitation", "Unknown skill"]
+    : /designer/i.test(title)
+      ? ["Figma", "Interaction design", "Design systems", "Unknown skill"]
+      : ["Figma", "Interaction design", "Unknown skill", "Unknown credential", "Unknown tool"]).map((line) => `- ${line}`).join("\n"),
   complete: false,
   ...extra,
 });
@@ -272,13 +276,13 @@ describe("runAgentScan (E16-3)", () => {
     expect(result).toEqual({ found: 3, fresh: 3, scored: 3, drafted: 0, skipped: 0, message: "2 new postings are waiting for a look." });
     const candidates = await prisma().agentCandidate.findMany({ orderBy: { score: "desc" } });
     expect(candidates.map((candidate) => [candidate.externalId, candidate.score, candidate.status])).toEqual([
-      ["a", 90, "SCORED"],
+      ["a", 86, "SCORED"],
       ["b", 75, "SCORED"],
       ["c", 40, "SCORED"],
     ]);
-    expect(candidates[0]).toMatchObject({ title: "Senior Product Designer", reasons: ["Fits Senior Product Designer."], dedupeKey: agentDedupeKey(page[0]) });
+    expect(candidates[0]).toMatchObject({ title: "Senior Product Designer", reasons: expect.arrayContaining(["Evidence found: Figma"]), dedupeKey: agentDedupeKey(page[0]) });
     // Find jobs shows the scores too (#208).
-    expect((await prisma().postingScore.findMany({ orderBy: { score: "desc" } })).map((row) => [row.externalId, row.score])).toEqual([["a", 90], ["b", 75], ["c", 40]]);
+    expect((await prisma().postingScore.findMany({ orderBy: { score: "desc" } })).map((row) => [row.externalId, row.score])).toEqual([["a", 86], ["b", 75], ["c", 40]]);
     // The run is on record, with how it ended.
     expect((await loadSettings()).agentRuns).toEqual([{ at: now.toISOString(), manual: false, message: "2 new postings are waiting for a look.", sourceRequests: 1, sourceRequestAts: [expect.any(String)], searches: [expect.objectContaining({ searchName: "My search", found: 3, fresh: 3, error: null })] }]);
   });
@@ -308,10 +312,10 @@ describe("runAgentScan (E16-3)", () => {
     expect(result).toMatchObject({ found: 3, scored: 3, message: "2 new postings are waiting for a look." });
     expect(requests.map((request) => request.headers.get("authorization"))).toEqual(["Bearer ts_secret", "Bearer ts_secret", "Bearer ts_secret"]);
     const candidates = await prisma().agentCandidate.findMany({ orderBy: { externalId: "asc" } });
-    expect(candidates.map((candidate) => [candidate.externalId, candidate.score])).toEqual([["a", 100], ["b", 100], ["c", 0]]);
-    expect(candidates[0].reasons).toContain("Covers: Senior Product Designer at Company a.");
-    expect(candidates[2].redFlags).toEqual(["The role's level is far from your experience.", "Missing: Office Manager at Company c."]);
-    expect((await prisma().postingScore.findFirstOrThrow({ where: { externalId: "a" } })).scoredWith).toBe("score-posting-jev@1 (jev-1.14.0)");
+    expect(candidates.map((candidate) => [candidate.externalId, candidate.score])).toEqual([["a", 86], ["b", 75], ["c", 40]]);
+    expect(candidates[0].reasons).toContain("Evidence found: Figma");
+    expect(candidates[2].redFlags).toEqual([]);
+    expect((await prisma().postingScore.findFirstOrThrow({ where: { externalId: "a" } })).scoredWith).toBe("score-posting-jev@2 (jev-1.14.0)");
   });
 
   it("scores the newest new postings first, up to the cap", async () => {

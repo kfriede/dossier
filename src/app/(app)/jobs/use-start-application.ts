@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { useState } from "react";
 
 import { toastResult } from "@/components/toast";
-import type { FoundPosting } from "@/lib/job-search/search";
+import type { StoredPosting } from "@/lib/job-search/search";
 
 import { startApplicationFrom } from "./actions";
 
@@ -17,7 +17,7 @@ export function useStartApplication() {
   const router = useRouter();
   const [starting, setStarting] = useState<string | null>(null);
 
-  const start = async (posting: FoundPosting, key: string) => {
+  const start = async (posting: StoredPosting, key: string) => {
     if (starting) return;
     setStarting(key);
     const result = toastResult(await startApplicationFrom({ posting }));

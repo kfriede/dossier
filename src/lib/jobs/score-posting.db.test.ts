@@ -62,14 +62,15 @@ afterAll(() => prisma().$disconnect());
 
 describe("Score in Find jobs (#208)", () => {
   it("gets the whole posting for a snippet, scores it and keeps the score with it", async () => {
-    fake.fullText = "The whole posting: design our freight tools.";
+    fake.fullText = "Requirements:\n- Figma\n- Must have work authorization";
     const run = context();
-    expect(await scorePostingJob.run({ posting }, run)).toEqual({ score: 78, reasons: ["Built a design system at Northwind."], redFlags: ["Dutch is required."] });
+    const fit = await scorePostingJob.run({ posting }, run);
+    expect(fit).toMatchObject({ score: 100, evidence: { requirements: [{ status: "supported" }, { kind: "eligibility", status: "unresolved" }] } });
     expect(run.steps).toEqual(["Getting the whole posting", "Scoring it against your profile"]);
-    expect(fake.sent[0]).toContain("The whole posting: design our freight tools.");
+    expect(fake.sent[0]).toContain("Must have work authorization");
 
-    expect(await prisma().postingScore.findUniqueOrThrow({ where: { source_externalId: { source: "ADZUNA", externalId: "az-1" } } })).toMatchObject({ score: 78, scoredWith: "score-posting@2" });
-    expect((await postingStates([posting])).get("ADZUNA:az-1")?.score).toEqual({ score: 78, reasons: ["Built a design system at Northwind."], redFlags: ["Dutch is required."] });
+    expect(await prisma().postingScore.findUniqueOrThrow({ where: { source_externalId: { source: "ADZUNA", externalId: "az-1" } } })).toMatchObject({ score: 100, scoredWith: "score-posting@3", evidence: fit.evidence });
+    expect((await postingStates([posting])).get("ADZUNA:az-1")?.score).toEqual(fit);
   });
 
   it("scores the start when the rest can't be had, and replaces an older score", async () => {
@@ -78,7 +79,7 @@ describe("Score in Find jobs (#208)", () => {
     await scorePostingJob.run({ posting }, run);
     expect(fake.sent[0]).toContain("The start…");
     expect(await prisma().postingScore.count()).toBe(1);
-    expect((await prisma().postingScore.findFirstOrThrow()).score).toBe(78);
+    expect((await prisma().postingScore.findFirstOrThrow()).score).toBe(0);
     // A whole posting goes straight to scoring.
     const whole = context();
     await scorePostingJob.run({ posting: { ...posting, complete: true } }, whole);
@@ -98,7 +99,7 @@ describe("scorePastedPostingJob (public issue 66)", () => {
       { posting: "Harbour Freight is hiring a Product Designer in Rotterdam. Dutch required.", title: "Product Designer", company: "Harbour Freight", location: "Rotterdam", mode: "Hybrid, 2 days remote", salary: "" },
       run,
     );
-    expect(result).toEqual({ score: 78, reasons: ["Built a design system at Northwind."], redFlags: ["Dutch is required."] });
+    expect(result).toMatchObject({ score: 0, evidence: { questions: expect.any(Array) } });
     expect(fake.sent[0]).toContain("Harbour Freight is hiring a Product Designer");
     expect(run.steps).toEqual(["Scoring it against your profile"]);
     expect(await prisma().postingScore.count()).toBe(0);

@@ -328,13 +328,14 @@ describe("creating the application (E7-6)", () => {
     matchedWith: "match-requirements@1",
   };
 
-  async function create() {
+  async function create(resumeFamily?: string) {
     vi.mocked(startWritingDocuments).mockResolvedValue({ ok: true, data: "job-2" });
     render(<NewApplication {...props} />);
     await userEvent.type(screen.getByLabelText("Job posting"), "Ledgerly is hiring.");
     await userEvent.click(screen.getByRole("button", { name: "Read the posting →" }));
     emit({ status: "DONE", result: read });
     await userEvent.type(screen.getByLabelText("Anything I should know?"), "Lean on research.");
+    if (resumeFamily) await userEvent.selectOptions(screen.getByLabelText("Resume focus"), resumeFamily);
     await userEvent.click(screen.getByRole("button", { name: "Create application →" }));
   }
 
@@ -348,6 +349,7 @@ describe("creating the application (E7-6)", () => {
       tone: "WARM",
       note: "Lean on research.",
       write: "both",
+      resumeFamily: "general",
     });
     expect(screen.getByRole("heading", { name: "Putting your application together…" })).toBeInTheDocument();
     expect(screen.getByText("Tailored documents").closest("li")).toHaveAttribute("aria-current", "step");
@@ -357,6 +359,12 @@ describe("creating the application (E7-6)", () => {
     await vi.waitFor(() => expect(router.push).toHaveBeenCalledWith("/applications/app-1"));
     expect(createApplication).toHaveBeenCalledWith(expect.objectContaining({ writeJobId: "job-2", postingUrl: "" }));
     expect(toast).toHaveBeenCalledWith("Your application is ready. Nothing gets sent until you say so.");
+  });
+
+  it("passes the selected role-family emphasis to the resume writer", async () => {
+    vi.mocked(createApplication).mockResolvedValue({ ok: true, data: "app-1" });
+    await create("engineering");
+    expect(startWritingDocuments).toHaveBeenCalledWith(expect.objectContaining({ resumeFamily: "engineering" }));
   });
 
   it("offers Retry, keeping everything, when saving fails", async () => {
@@ -492,4 +500,3 @@ describe("keeping the draft (E7-7)", () => {
     confirm.mockRestore();
   });
 });
-

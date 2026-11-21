@@ -1,7 +1,8 @@
 import "server-only";
 
+import { PostingSource } from "@/generated/prisma/enums";
 import { fullText } from "@/lib/job-search/find";
-import type { FoundPosting } from "@/lib/job-search/search";
+import type { StoredPosting } from "@/lib/job-search/search";
 import { storePosting } from "@/lib/postings";
 import { prisma } from "@/lib/prisma";
 
@@ -48,7 +49,15 @@ function promptFor(kind: Handoff, ref: string, about: string): string {
 }
 
 /** For a posting from Find jobs: keeps it with its whole text, and gives the chat to open. */
-export async function handOffFoundPosting(posting: FoundPosting, kind: Handoff): Promise<string> {
+export async function handOffFoundPosting(posting: StoredPosting, kind: Handoff): Promise<string> {
+  if (posting.source === PostingSource.IMPORTED) {
+    const stored = await prisma.posting.findUnique({
+      where: { source_externalId: { source: PostingSource.IMPORTED, externalId: posting.externalId } },
+      select: { id: true },
+    });
+    if (!stored) throw new Error("That imported posting is no longer in Dossier.");
+    return claudeChatUrl(promptFor(kind, `with posting_id "${stored.id}"`, describe(posting.title, posting.company)));
+  }
   const text = posting.complete ? posting.description : await fullText(posting);
   const stored = await storePosting(text ? { ...posting, description: text, complete: true } : posting);
   return claudeChatUrl(promptFor(kind, `with posting_id "${stored.id}"`, describe(posting.title, posting.company)));

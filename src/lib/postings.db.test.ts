@@ -34,8 +34,8 @@ beforeEach(() => resetDatabase(prisma()));
 afterAll(() => prisma().$disconnect());
 
 describe("postings", () => {
-  it("lists the same sources as the schema's enum", () => {
-    expect([...JOB_SOURCES].sort()).toEqual(Object.values(PostingSource).sort());
+  it("keeps imported postings out of provider search sources", () => {
+    expect([...JOB_SOURCES].sort()).toEqual(Object.values(PostingSource).filter((source) => source !== PostingSource.IMPORTED).sort());
   });
 
   it("saves a posting with everything the screen needs, and reads it back in the same shape", async () => {
@@ -105,6 +105,33 @@ describe("the Saved and Dismissed views (E14-7)", () => {
     expect(saved[0].state).toMatchObject({ postingId: expect.any(String), saved: true, dismissed: false });
     expect((await listPostings("dismissed")).map((posting) => posting.title)).toEqual(["Not for me"]);
     expect(await countPostings()).toEqual({ saved: 2, dismissed: 1 });
+  });
+
+  it("keeps imported provenance in Saved without treating it as a provider source", async () => {
+    await prisma().posting.create({
+      data: {
+        source: PostingSource.IMPORTED,
+        externalId: "imported-1",
+        title: "Product Designer",
+        company: "Acme",
+        description: "Design systems",
+        complete: true,
+        savedAt: new Date(),
+        sourceKind: "External research",
+        sourceUrl: "https://research.example/acme",
+        reportedCheckedAt: new Date("2026-10-23T09:00:00Z"),
+      },
+    });
+
+    expect(await listPostings("saved")).toMatchObject([
+      {
+        source: PostingSource.IMPORTED,
+        sourceKind: "External research",
+        sourceUrl: "https://research.example/acme",
+        reportedCheckedAt: "2026-10-23T09:00:00.000Z",
+        state: { saved: true },
+      },
+    ]);
   });
 });
 

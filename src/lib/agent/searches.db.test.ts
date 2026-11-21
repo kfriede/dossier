@@ -94,7 +94,7 @@ describe("recurring Agent search storage", () => {
     expect(await client.agentCandidateSearch.count()).toBe(0);
   });
 
-  it("round trips v11 searches and historical attribution, removes old storage, and preserves the quota ledger", async () => {
+  it("round trips saved searches and historical attribution, removes old storage, and preserves the quota ledger", async () => {
     const first = await saveAgentSearch(input, undefined, client);
     const second = await saveAgentSearch({ ...input, name: "Disabled", enabled: false }, undefined, client);
     await client.agentCandidate.create({ data: candidateData(posting("kept"), score) });
@@ -103,7 +103,7 @@ describe("recurring Agent search storage", () => {
     await deleteAgentSearch(first.id, client);
     await client.setting.createMany({ data: [{ key: "agentRuns", value: "[]" }, { key: "agentQuery", value: JSON.stringify(input.query) }] });
     const data = await buildExport(client);
-    expect(data.schemaVersion).toBe(11);
+    expect(data.schemaVersion).toBe(14);
     expect(data.settings.map((setting) => setting.key)).not.toContain("agentQuery");
     expect(data.settings.map((setting) => setting.key)).not.toContain("agentRuns");
     const parsed = parseExport(JSON.stringify(data));

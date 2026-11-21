@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { toast } from "@/components/toast";
 import { EMPTY_QUERY, type PostingState, type ShownPosting, type StoredSearch } from "@/lib/job-search/search";
+import { DEFAULT_SEARCH_PREFERENCES } from "@/lib/job-search/preferences";
 
 import {
   acceptArbeitsagenturNote,
@@ -88,6 +89,23 @@ beforeEach(() => {
 });
 
 describe("the search form", () => {
+  it("shows triage without reordering or hiding results", async () => {
+    renderScreen({
+      search: stored([posting("first", { remote: false }), posting("second", { remote: true })]),
+      preferences: { ...DEFAULT_SEARCH_PREFERENCES, remote: "firm" },
+    });
+    const list = screen.getByRole("list", { name: "Postings" });
+    expect(within(list).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+      expect.stringContaining("Designer first"), expect.stringContaining("Designer second"),
+    ]);
+    expect(screen.getByLabelText("Search preference triage")).toHaveTextContent("Suggested: Skip");
+    await userEvent.click(within(list).getByRole("button", { name: /^Designer second/ }));
+    expect(screen.getByLabelText("Search preference triage")).toHaveTextContent("Suggested: Apply");
+    expect(within(list).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+      expect.stringContaining("Designer first"), expect.stringContaining("Designer second"),
+    ]);
+  });
+
   it("points to Settings while job search is off", () => {
     renderScreen({ source: null });
     expect(screen.getByRole("heading", { name: "Choose where to search" })).toBeInTheDocument();

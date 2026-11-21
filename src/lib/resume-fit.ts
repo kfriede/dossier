@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { Unit } from "@/lib/application-data";
 import { sameName, type ProfileData } from "@/lib/profile";
 import { skillNamesIn } from "@/lib/skill-groups";
+import { evidenceMatchSchema } from "@/lib/scoring/evidence";
 
 // How well an application's tailored resume fits its posting (#370), scored on
 // request by the scorer in Settings → Scoring: Jev, or the AI model. It reads
@@ -13,6 +14,7 @@ export const resumeFitSchema = z.object({
   score: z.number().int().min(0).max(100),
   reasons: z.array(z.string()),
   redFlags: z.array(z.string()),
+  evidence: evidenceMatchSchema.optional(),
   /** The scorer and its version, e.g. "score-posting@2" or "score-posting-jev@1". */
   scoredWith: z.string(),
   scoredAt: z.iso.datetime(),
@@ -30,6 +32,10 @@ export function tailoredProfile(profile: ProfileData, units: Unit[]): ProfileDat
   const listed = (prefix: string) => (entry: { id: string }) => text(`${prefix}${entry.id}`) !== undefined;
   const skills = text("skills");
   const skillNames = skills === undefined ? null : skillNamesIn(skills);
+  const mentionedInDuties = (skill: { id: string; name: string }) =>
+    [...profile.experience.filter(listed("experience:")).map((entry) => ({ ...entry, text: text(`experience:${entry.id}`)! })),
+      ...profile.projects.filter(listed("project:")).map((entry) => ({ ...entry, text: text(`project:${entry.id}`)! }))]
+      .some((entry) => entry.skillIds.includes(skill.id) && entry.text.toLocaleLowerCase().includes(skill.name.toLocaleLowerCase()));
   return {
     ...profile,
     basics: { ...profile.basics, summary: text("summary") ?? "" },
@@ -38,7 +44,7 @@ export function tailoredProfile(profile: ProfileData, units: Unit[]): ProfileDat
     education: profile.education.filter(listed("education:")).map((entry) => ({ ...entry, notes: text(`education:${entry.id}`)! })),
     certifications: profile.certifications.filter(listed("certification:")),
     publications: profile.publications.filter(listed("publication:")),
-    skills: skillNames === null ? profile.skills : profile.skills.filter((skill) => skillNames.some((name) => sameName(name, skill.name))),
+    skills: profile.skills.filter((skill) => (skillNames?.some((name) => sameName(name, skill.name)) ?? false) || mentionedInDuties(skill)),
     facts: [],
   };
 }

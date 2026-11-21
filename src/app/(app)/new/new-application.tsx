@@ -16,6 +16,7 @@ import { useJob } from "@/hooks/use-job";
 import type { DocumentsToWrite } from "@/lib/settings";
 import { withSkillAdded, type Extracted } from "@/lib/application-data";
 import type { PostingFit } from "@/lib/fit";
+import type { ResumeFamily } from "@/lib/resume-families";
 import { cancel, retry } from "@/lib/jobs/actions";
 import { READ_POSTING_STEPS, WRITE_DOCUMENTS_STEPS } from "@/lib/jobs/application-steps";
 import type { ReadPostingResult } from "@/lib/jobs/read-posting";
@@ -61,6 +62,8 @@ export type Draft = {
   note: string;
   /** Which documents to write (#367); missing in drafts from before, which wrote both. */
   write?: DocumentsToWrite;
+  /** Role-family resume emphasis; missing in earlier tab drafts. */
+  resumeFamily?: ResumeFamily;
   writeJobId: string | null;
   /** The Find jobs posting it was started from (E14-8); missing in drafts from before. */
   postingId?: string | null;
@@ -177,6 +180,7 @@ export function NewApplication({
     tone: defaultTone,
     note: "",
     write: defaultWrite,
+    resumeFamily: "general",
     writeJobId: null,
     postingId: null,
   }));
@@ -344,7 +348,15 @@ export function NewApplication({
     if (!draft.read || !draft.readJobId || starting) return;
     setStarting(true);
     const result = toastResult(
-      await startWritingDocuments({ readJobId: draft.readJobId, details: draft.details, match: draft.read.match, tone: draft.tone, note: draft.note, write: draft.write ?? "both" }),
+      await startWritingDocuments({
+        readJobId: draft.readJobId,
+        details: draft.details,
+        match: draft.read.match,
+        tone: draft.tone,
+        note: draft.note,
+        write: draft.write ?? "both",
+        resumeFamily: draft.resumeFamily ?? "general",
+      }),
     );
     setStarting(false);
     if (!result.ok) return;
@@ -479,9 +491,11 @@ export function NewApplication({
               <ScoreCard fit={draft.score ?? null} scoring={scoring} step={scoreJob?.step ?? null} onScore={() => void scoreIt()} />
               <TailoringCard
                 write={draft.write ?? "both"}
+                resumeFamily={draft.resumeFamily ?? "general"}
                 tone={draft.tone}
                 note={draft.note}
                 onWrite={(write) => update({ write })}
+                onResumeFamily={(resumeFamily) => update({ resumeFamily })}
                 onTone={(tone) => update({ tone })}
                 onNote={(note) => update({ note })}
               />

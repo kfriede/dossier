@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useState, useTransition, type ReactNode } from "react";
 
 import { PageHeader } from "@/components/page-header";
+import { PostingTriage } from "@/components/posting-triage";
 import { ScoreBadge } from "@/components/score-badge";
 import { linksAttribution, SourceAttribution } from "@/components/source-attribution";
 import { toast, toastResult } from "@/components/toast";
@@ -345,6 +346,15 @@ function CandidateCard({ candidate, children }: { candidate: AgentCandidateView;
           </ul>
         </div>
       )}
+      {(candidate.questions?.length ?? 0) > 0 && (
+        <div className="text-meta text-muted">
+          <p className="font-medium">Questions for you</p>
+          <ul className="mt-1 flex list-disc flex-col gap-0.5 pl-4">
+            {candidate.questions?.map((question, index) => <li key={index}>{question}</li>)}
+          </ul>
+        </div>
+      )}
+      {candidate.triage && <PostingTriage triage={candidate.triage} />}
       {candidate.error && (
         <p role="alert" className="text-meta text-error">
           {candidate.error}

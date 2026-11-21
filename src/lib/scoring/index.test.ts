@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AiError } from "@/lib/ai/errors";
 import { MockProvider } from "@/lib/ai/providers/mock";
 import { demoProfile } from "@/lib/demo-profile";
+import type { ProfileData } from "@/lib/profile";
 
 import type { ScoringConfig } from "./config";
 import { loadPostingScorer, scoringProblem } from "./index";
@@ -18,13 +19,18 @@ vi.mock("@/lib/ai/config", () => ({ isAiConfigured: async () => state.aiReady })
 vi.mock("@/lib/ai", () => ({ getAiProvider: async () => state.provider }));
 vi.mock("@/lib/ai/task-options", () => ({ loadTaskOptions: async () => ({ creativity: "BALANCED", strict: true, language: null }) }));
 vi.mock("@/lib/usage-data", () => ({ recordUsage: vi.fn() }));
-vi.mock("./jev", () => ({ scoreWithJev: vi.fn(async () => ({ data: { score: 80, reasons: ["Covers: Figma"], redFlags: [] }, scoredWith: "score-posting-jev@1 (jev-1.14.0)" })) }));
+vi.mock("./jev", () => ({
+  scoreWithJev: vi.fn(async (posting: { description: string }, profile: ProfileData) => {
+    const { evidenceFit, matchEvidence } = await import("./evidence");
+    return { data: evidenceFit(matchEvidence(posting.description, profile)), scoredWith: "score-posting-jev@1 (jev-1.14.0)" };
+  }),
+}));
 
 const { scoreWithJev } = await import("./jev");
 const { recordUsage } = await import("@/lib/usage-data");
 
 const profile = demoProfile();
-const posting = { title: "Designer", company: "Ledgerly", place: "Amsterdam", remote: false, salary: "", description: "You know Figma." };
+const posting = { title: "Designer", company: "Ledgerly", place: "Amsterdam", remote: false, salary: "", description: "Requirements:\n- Figma" };
 const signal = new AbortController().signal;
 
 beforeEach(() => {
@@ -50,7 +56,7 @@ describe("loadPostingScorer", () => {
     state.config = { scorer: "JEV", saved: true, key: "ts", keyState: "set" };
     state.aiReady = false;
     const score = await loadPostingScorer();
-    expect(await score(posting, profile, signal)).toEqual({ data: { score: 80, reasons: ["Covers: Figma"], redFlags: [] }, scoredWith: "score-posting-jev@1 (jev-1.14.0)" });
+    expect(await score(posting, profile, signal)).toMatchObject({ data: { score: 100, evidence: { requirements: [{ status: "supported" }] } }, scoredWith: "score-posting-jev@1 (jev-1.14.0)" });
     // Jev's tokens go to the Usage screen (#290).
     expect(scoreWithJev).toHaveBeenCalledWith(posting, profile, { key: "ts", signal, onUsage: recordUsage });
   });
@@ -59,9 +65,20 @@ describe("loadPostingScorer", () => {
     const provider = new MockProvider({ reply: () => ({ score: 72, reasons: ["Knows Figma."], redFlags: [] }) });
     state.provider = provider;
     const score = await loadPostingScorer();
-    expect(await score(posting, profile, signal)).toEqual({ data: { score: 72, reasons: ["Knows Figma."], redFlags: [] }, scoredWith: "score-posting@2" });
+    expect(await score(posting, profile, signal)).toMatchObject({ data: { score: 100, evidence: { requirements: [{ status: "supported" }] } }, scoredWith: "score-posting@3" });
     expect(provider.calls[0].messages[0].content).toContain("Ledgerly: Designer");
     expect(scoreWithJev).not.toHaveBeenCalled();
+  });
+
+  it("uses the same evidence and eligibility rules for either provider", async () => {
+    const description = "Requirements:\n- Figma\n- Must have work authorization\n- Bachelor degree or equivalent experience";
+    state.provider = new MockProvider({ reply: () => ({ score: 99, reasons: ["Unverified."], redFlags: [] }) });
+    const ai = await (await loadPostingScorer())({ ...posting, description }, profile, signal);
+    state.config = { scorer: "JEV", saved: true, key: "ts", keyState: "set" };
+    const jev = await (await loadPostingScorer())({ ...posting, description }, profile, signal);
+    expect(ai.data).toEqual(jev.data);
+    expect(ai.data.evidence?.requirements.map((item) => item.kind)).toEqual(["skill", "eligibility", "qualification"]);
+    expect(ai.data.evidence?.questions).toHaveLength(2);
   });
 
   it("fails with what's missing", async () => {

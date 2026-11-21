@@ -40,6 +40,10 @@ export function versionLabel({ cause, detail }: Pick<Version, "cause" | "detail"
       return "As it was before a restore";
     case "RESTORED":
       return detail ? `Brought back the version from ${versionTime(detail)}` : "Brought back an earlier version";
+    case "BEFORE_PROPOSAL":
+      return "As it was before an approved proposal";
+    case "PROPOSED":
+      return "Approved proposed changes";
   }
 }
 
@@ -94,7 +98,7 @@ export function VersionHistory({
             <div className="flex flex-col gap-1">
               <Dialog.Title className="font-serif text-[22px] leading-tight">History of the {name}</Dialog.Title>
               <Dialog.Description className="text-sm text-muted">
-                A version is saved with each AI change and before each restore. Your own edits are in the current version.
+                A version is saved with each AI change and approved proposal, and before each restore. Your own edits are in the current version.
               </Dialog.Description>
             </div>
             <Dialog.Close className="rounded-control px-2 py-1 text-sm text-muted hover:bg-hover hover:text-ink">Close</Dialog.Close>

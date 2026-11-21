@@ -5,7 +5,7 @@ import { STATUSES, statusInfo } from "@/lib/status";
 // URL (?view=&filter=&q=&sort=&archived=) so links can be shared and back and
 // forward work.
 
-export const VIEWS = ["board", "table"] as const;
+export const VIEWS = ["board", "table", "queue"] as const;
 export type View = (typeof VIEWS)[number];
 
 export const FILTERS = [

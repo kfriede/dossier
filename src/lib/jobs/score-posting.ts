@@ -2,16 +2,18 @@ import "server-only";
 
 import { z } from "zod";
 
+import { PostingSource } from "@/generated/prisma/enums";
 import { fullText } from "@/lib/job-search/find";
-import { foundPostingSchema, postingKey, type FoundPosting } from "@/lib/job-search/search";
+import { postingKey, storedPostingSchema, type StoredPosting } from "@/lib/job-search/search";
 import { saveScore } from "@/lib/posting-scores";
 import { loadProfile } from "@/lib/profile-data";
 import { loadPostingScorer } from "@/lib/scoring";
+import { evidenceMatchSchema } from "@/lib/scoring/evidence";
 
 import { defineJob } from "./runner";
 
 /** The key of a posting's scoring job, so a second click follows the one under way. */
-export const scoreJobKey = (posting: Pick<FoundPosting, "source" | "externalId">) => `posting-score:${postingKey(posting)}`;
+export const scoreJobKey = (posting: Pick<StoredPosting, "source" | "externalId">) => `posting-score:${postingKey(posting)}`;
 
 /**
  * Score in Find jobs (#208): how well one posting fits the profile, as the
@@ -21,11 +23,11 @@ export const scoreJobKey = (posting: Pick<FoundPosting, "source" | "externalId">
  */
 export const scorePostingJob = defineJob({
   type: "posting-score",
-  input: z.object({ posting: foundPostingSchema }),
-  result: z.object({ score: z.number().int(), reasons: z.array(z.string()), redFlags: z.array(z.string()) }),
+  input: z.object({ posting: storedPostingSchema }),
+  result: z.object({ score: z.number().int(), reasons: z.array(z.string()), redFlags: z.array(z.string()), evidence: evidenceMatchSchema.optional() }),
   async run({ posting }, { step, signal }) {
     let description = posting.description;
-    if (!posting.complete) {
+    if (!posting.complete && posting.source !== PostingSource.IMPORTED) {
       await step("Getting the whole posting");
       description = (await fullText(posting)) ?? posting.description;
     }
@@ -52,7 +54,7 @@ export const scorePastedPostingJob = defineJob({
     mode: z.string().max(200),
     salary: z.string().max(200),
   }),
-  result: z.object({ score: z.number().int(), reasons: z.array(z.string()), redFlags: z.array(z.string()) }),
+  result: z.object({ score: z.number().int(), reasons: z.array(z.string()), redFlags: z.array(z.string()), evidence: evidenceMatchSchema.optional() }),
   async run({ posting, title, company, location, mode, salary }, { step, signal }) {
     await step("Scoring it against your profile");
     const [score, profile] = await Promise.all([loadPostingScorer(), loadProfile()]);

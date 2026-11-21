@@ -75,26 +75,35 @@ export async function countTailoredDocuments(): Promise<number> {
  */
 export const zipPdfsJob = defineJob({
   type: "zip-pdfs",
-  input: z.object({}),
+  input: z.object({ applicationIds: z.array(z.string().min(1)).min(1).max(10).optional() }),
   result: z.object({
     /** The zip's name in the downloads folder, not a path. */
     file: z.string().regex(/^[\w-]+\.zip$/),
     fileName: z.string(),
     documents: z.number().int(),
   }),
-  async run(_input, { step, signal }) {
+  async run({ applicationIds }, { step, signal }) {
     const now = new Date();
     await removeOldZips(now.getTime());
+    const recipientHandoff = applicationIds !== undefined;
     const [applications, name, settings] = await Promise.all([
       prisma.application.findMany({
-        where: { documents: { some: { kind: { in: PRINTED } } } },
+        where: {
+          documents: { some: { kind: { in: PRINTED } } },
+          ...(applicationIds ? { id: { in: applicationIds } } : {}),
+        },
         orderBy: { createdAt: "asc" },
         select: { id: true, company: true, role: true, documents: { where: { kind: { in: PRINTED } }, select: { kind: true }, orderBy: { kind: "asc" } } },
       }),
       loadProfileName(),
       loadSettings(),
     ]);
+    if (applicationIds) applications.sort((a, b) => applicationIds.indexOf(a.id) - applicationIds.indexOf(b.id));
+    if (applicationIds && applications.length !== applicationIds.length) {
+      throw new Error("One or more selected applications no longer have recipient documents.");
+    }
     const documents = applications.flatMap((application) => application.documents.map(({ kind }) => ({ application, kind })));
+    if (recipientHandoff && documents.length === 0) throw new Error("No recipient documents are available for this handoff.");
 
     let done = 0;
     await step(`Rendering ${documents.length} documents`);
@@ -125,6 +134,7 @@ export const zipPdfsJob = defineJob({
     await mkdir(downloadsDir(), { recursive: true });
     const file = `${randomUUID()}.zip`;
     await writeFile(path.join(downloadsDir(), file), zipSync(files));
-    return { file, fileName: zipFileName(now), documents: documents.length };
+    const fileName = recipientHandoff ? zipFileName(now).replace("dossier-pdfs-", "dossier-handoff-") : zipFileName(now);
+    return { file, fileName, documents: documents.length };
   },
 });

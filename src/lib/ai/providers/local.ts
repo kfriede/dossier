@@ -66,4 +66,8 @@ export class LocalProvider implements AIProvider {
   async test(signal?: AbortSignal) {
     return (await this.delegate(signal)).test(signal);
   }
+
+  async testStructured(signal?: AbortSignal) {
+    return (await this.delegate(signal)).testStructured(signal);
+  }
 }

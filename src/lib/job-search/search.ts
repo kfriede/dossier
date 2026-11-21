@@ -14,7 +14,7 @@ import { SOURCE_INFO } from "./sources";
 
 /** The job sources Dossier can search (E14-1 to E14-3, FreeHire), in the order Settings lists them; one is chosen there. */
 export const JOB_SOURCES = [PostingSource.JSEARCH, PostingSource.ADZUNA, PostingSource.FREEHIRE, PostingSource.ARBEITSAGENTUR] as const;
-export type JobSource = PostingSource;
+export type JobSource = Exclude<PostingSource, typeof PostingSource.IMPORTED>;
 
 /** Where a JSearch key comes from: OpenWeb Ninja directly, or the RapidAPI marketplace. */
 export const JSEARCH_HOSTS = ["openwebninja", "rapidapi"] as const;
@@ -125,6 +125,23 @@ export type PostingState = {
 /** A posting as Find jobs shows it. */
 export type ShownPosting = FoundPosting & { state: PostingState };
 
+/** Provenance reported by an authenticated connector for a saved imported posting. */
+export const importedPostingSchema = foundPostingSchema.omit({ source: true }).extend({
+  source: z.literal(PostingSource.IMPORTED),
+  requisitionId: z.string().nullable(),
+  sourceKind: z.string(),
+  sourceUrl: z.string(),
+  reportedRetrievedAt: z.iso.datetime().nullable(),
+  reportedCheckedAt: z.iso.datetime().nullable(),
+  researchNotes: z.string(),
+});
+export type ImportedPosting = z.output<typeof importedPostingSchema>;
+
+/** A saved posting can come from Find jobs or from an external research import. */
+export const storedPostingSchema = z.union([foundPostingSchema, importedPostingSchema]);
+export type StoredPosting = z.output<typeof storedPostingSchema>;
+export type ShownStoredPosting = StoredPosting & { state: PostingState };
+
 /** What went wrong with a search, in words for the screen (E14-6). */
 export type SearchProblem = { ok: false; problem: "off" | "not-accepted" | "no-country" | "no-key" | "key" | "quota" | "country" | "unavailable" | "changed"; message: string };
 
@@ -158,7 +175,7 @@ export function describeSearch(query: SearchQuery, countryName: string, source?:
 }
 
 /** Identifies a posting across searches. */
-export const postingKey = (posting: { source: JobSource; externalId: string }) => `${posting.source}:${posting.externalId}`;
+export const postingKey = (posting: { source: PostingSource; externalId: string }) => `${posting.source}:${posting.externalId}`;
 
 /** A link from a source, kept only when it's a web address, so it can't run script as an href. */
 export function safeLink(value: string | null | undefined): string {

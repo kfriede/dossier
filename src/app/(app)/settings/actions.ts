@@ -31,6 +31,14 @@ import { applySecretChange, JOB_SOURCE_KEY, TYPESAFE_KEY } from "@/lib/secrets";
 import { seedBuiltIns } from "../../../../prisma/seed/built-ins";
 import { DOCUMENTS_TO_WRITE, isJobRetention } from "@/lib/settings";
 import { loadSettings, saveSettings } from "@/lib/settings-data";
+import { searchPreferencesSchema } from "@/lib/job-search/preferences";
+
+export const saveSearchPreferences = action(searchPreferencesSchema, async (searchPreferences) => {
+  await saveSettings({ searchPreferences });
+  revalidatePath("/jobs");
+  revalidatePath("/agent");
+  return searchPreferences;
+});
 
 // Settings → AI provider (E6-3). Every field saves on its own, so a test
 // or a model list always reflects what's saved.
@@ -99,15 +107,28 @@ export const listAiModels = action(z.object({}), async () => {
 /** A test connection on a stop-watch has no business waiting minutes. */
 const TEST_TIMEOUT_MS = 60_000;
 
-/** "Test connection" (SET-2): a short prompt to the saved provider, timed. */
+/** Tests plain text and schema-constrained output separately against the saved provider. */
 export const testAiConnection = action(z.object({}), async () => {
   try {
     const config = await loadAiConfig();
     const provider = createProvider({ ...config, timeoutMs: Math.min(config.timeoutMs, TEST_TIMEOUT_MS) });
-    const { model, latencyMs } = await provider.test();
-    return { connected: true as const, model, seconds: Math.round(latencyMs / 100) / 10 };
+    const outcome = async (test: () => Promise<{ model: string; latencyMs: number }>) => {
+      try {
+        const { model, latencyMs } = await test();
+        return { connected: true as const, model, seconds: Math.round(latencyMs / 100) / 10 };
+      } catch (error) {
+        if (error instanceof AiError) return { connected: false as const, message: error.message };
+        throw error;
+      }
+    };
+    const text = await outcome(() => provider.test(AbortSignal.timeout(TEST_TIMEOUT_MS)));
+    const structured = await outcome(() => provider.testStructured(AbortSignal.timeout(TEST_TIMEOUT_MS)));
+    return { text, structured };
   } catch (error) {
-    if (error instanceof AiError) return { connected: false as const, message: error.message };
+    if (error instanceof AiError) {
+      const failed = { connected: false as const, message: error.message };
+      return { text: failed, structured: failed };
+    }
     throw error;
   }
 });
@@ -291,6 +312,7 @@ export const deleteEverything = action(z.object({ confirm: z.literal("DELETE") }
     // The tokens each AI request used (#290).
     await tx.aiUsage.deleteMany();
     // Find jobs' postings and past searches (E14-9, E14-10).
+    await tx.connectorWriteReceipt.deleteMany();
     await tx.posting.deleteMany();
     await tx.postingSearch.deleteMany();
     // Postings pasted for Claude chat (#221); the connector goes off with the settings.

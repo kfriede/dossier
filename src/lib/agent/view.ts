@@ -1,11 +1,13 @@
 import "server-only";
 
-import { AgentCandidateStatus, JobStatus } from "@/generated/prisma/enums";
+import { AgentCandidateStatus, JobStatus, PostingSource } from "@/generated/prisma/enums";
 import { formatDateTime } from "@/lib/dates";
 import { postedAgo, type JobSource } from "@/lib/job-search/search";
 import { SOURCE_INFO } from "@/lib/job-search/sources";
 import { prisma } from "@/lib/prisma";
 import { loadSettings } from "@/lib/settings-data";
+import { evidenceMatchSchema } from "@/lib/scoring/evidence";
+import { triagePosting, type Triage } from "@/lib/job-search/preferences";
 import { lastKnownTimeZone } from "@/lib/time-zone";
 import type { AgentSearchRun } from "@/lib/settings";
 
@@ -35,6 +37,8 @@ export type AgentCandidateView = {
   score: number;
   reasons: string[];
   redFlags: string[];
+  questions?: string[];
+  triage?: Triage;
   /** Why the last try at a draft failed. */
   error: string | null;
   /** The draft, once there is one. */
@@ -117,30 +121,43 @@ export async function loadAgentView(now = new Date()): Promise<AgentView> {
     for (const run of settings.agentRuns) if (run.message === null) run.message = interruptedRunMessage(run);
   }
   const draftJob = new Map(draftJobs.map((job) => [job.key?.replace(/^agent-candidate:/, ""), job.id]));
+  const scores = candidates.length ? await prisma.postingScore.findMany({
+    where: { OR: candidates.map(({ source, externalId }) => ({ source, externalId })) },
+    select: { source: true, externalId: true, evidence: true },
+  }) : [];
+  const questions = new Map(scores.map((score) => {
+    const parsed = evidenceMatchSchema.safeParse(score.evidence);
+    return [`${score.source}:${score.externalId}`, parsed.success ? parsed.data.questions : []] as const;
+  }));
 
   const setupProblem = await agentSetupProblem();
 
-  const view = (candidate: (typeof candidates)[number]): AgentCandidateView => ({
-    searches: candidate.searches,
-    id: candidate.id,
-    title: candidate.title.trim() || "Untitled posting",
-    company: candidate.company.trim(),
-    facts: [candidate.place, candidate.remote ? "Remote" : "", candidate.salary].filter(Boolean).join(" · "),
-    origin: [
-      candidate.postedAt ? `Posted ${posted(postedAgo(candidate.postedAt.toISOString(), now))}` : "",
-      [candidate.via ? `via ${candidate.via}` : "", `on ${SOURCE_INFO[candidate.source].name}`].filter(Boolean).join(" "),
-    ]
-      .filter(Boolean)
-      .join(" · "),
-    source: candidate.source,
-    url: candidate.url,
-    score: candidate.score,
-    reasons: stringsOf(candidate.reasons),
-    redFlags: stringsOf(candidate.redFlags),
-    error: candidate.error,
-    applicationId: candidate.applicationId,
-    draftJobId: draftJob.get(candidate.id) ?? null,
-  });
+  const view = (candidate: (typeof candidates)[number]): AgentCandidateView => {
+    if (candidate.source === PostingSource.IMPORTED) throw new Error("Imported postings cannot appear in the job agent.");
+    return {
+      searches: candidate.searches,
+      id: candidate.id,
+      title: candidate.title.trim() || "Untitled posting",
+      company: candidate.company.trim(),
+      facts: [candidate.place, candidate.remote ? "Remote" : "", candidate.salary].filter(Boolean).join(" · "),
+      origin: [
+        candidate.postedAt ? `Posted ${posted(postedAgo(candidate.postedAt.toISOString(), now))}` : "",
+        [candidate.via ? `via ${candidate.via}` : "", `on ${SOURCE_INFO[candidate.source].name}`].filter(Boolean).join(" "),
+      ]
+        .filter(Boolean)
+        .join(" · "),
+      source: candidate.source,
+      url: candidate.url,
+      score: candidate.score,
+      reasons: stringsOf(candidate.reasons),
+      redFlags: stringsOf(candidate.redFlags),
+      questions: questions.get(`${candidate.source}:${candidate.externalId}`) ?? [],
+      triage: triagePosting(candidate, settings.searchPreferences),
+      error: candidate.error,
+      applicationId: candidate.applicationId,
+      draftJobId: draftJob.get(candidate.id) ?? null,
+    };
+  };
   const drafts = candidates.filter((candidate) => candidate.status === AgentCandidateStatus.DRAFTED && candidate.applicationId).map(view);
   const waiting = candidates.filter((candidate) => candidate.status !== AgentCandidateStatus.DRAFTED);
   const last = settings.agentRuns[0];

@@ -87,6 +87,7 @@ describe("startWritingDocuments", () => {
       extracted: { company: "Ledgerly B.V.", title: "Designer at Ledgerly", salary: null, deadline: "2026-10-20", requirements: extracted.requirements },
       tone: "WARM",
       note: "Hi",
+      resumeFamily: "general",
     });
   });
 
@@ -112,6 +113,7 @@ describe("createApplication", () => {
       title: "Designer at Ledgerly",
       company: "Ledgerly B.V.",
       salary: "",
+      resumeFamily: "general",
       postingUrl: "https://jobs.ledgerly.example/42",
       postingText: "Ledgerly is hiring a Senior Product Designer.",
       extracted: { company: "Ledgerly" },
@@ -120,6 +122,7 @@ describe("createApplication", () => {
       tone: "FORMAL",
       language: "English",
     });
+
     // "Anything I should know?" is the application's first fact (APP-15).
     expect(await prisma().fact.findMany({ where: { applicationId: id }, select: { text: true } })).toEqual([{ text: "Relocating in January." }]);
     expect(application.deadline?.toISOString().slice(0, 10)).toBe("2026-10-20");
@@ -132,6 +135,16 @@ describe("createApplication", () => {
     expect(application.messages[0]).toMatchObject({ role: "AI", text: expect.stringMatching(/^Here's what I tailored for Ledgerly B\.V\.:\n\n- /) });
     expect(application.messages[0].text).toMatch(/Nothing invented: every line comes from your profile\.$/);
     expect(await prisma().job.count({ where: { key: `application:${id}`, applicationId: id } })).toBe(2);
+  });
+
+  it("keeps the selected resume family with the application", async () => {
+    await finishedJobs();
+    const job = await prisma().job.findUniqueOrThrow({ where: { id: "write-job" } });
+    await prisma().job.update({ where: { id: job.id }, data: { input: { ...(job.input as Record<string, unknown>), resumeFamily: "engineering" } } });
+
+    const result = await createApplication({ writeJobId: "write-job", details, postingUrl: "" });
+    const application = await prisma().application.findUniqueOrThrow({ where: { id: result.ok ? result.data : "" } });
+    expect(application.resumeFamily).toBe("engineering");
   });
 
   it("creates the application without the document that wasn't asked for (#367)", async () => {

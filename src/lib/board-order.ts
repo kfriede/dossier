@@ -17,6 +17,18 @@ export function orderedColumn(rows: ApplicationRow[], status: ApplicationRow["st
   return rows.filter((row) => row.status === status).sort(boardOrder);
 }
 
+/** A global operator order; applications not yet placed come first, newest update first. */
+export function queueOrder(a: { queueSort: number | null; updatedAt: number | Date }, b: { queueSort: number | null; updatedAt: number | Date }) {
+  if (a.queueSort === null && b.queueSort === null) return Number(b.updatedAt) - Number(a.updatedAt);
+  if (a.queueSort === null) return -1;
+  if (b.queueSort === null) return 1;
+  return a.queueSort - b.queueSort;
+}
+
+export function orderedQueue<T extends { queueSort: number | null; updatedAt: number | Date }>(rows: T[]): T[] {
+  return [...rows].sort(queueOrder);
+}
+
 /** The whole column with the cards on screen in their new order, sharing the places they held; hidden cards stay put. */
 export function withShownOrder<Card extends { id: string }>(column: Card[], shown: string[]) {
   const ordered = [...new Set(shown)].flatMap((id) => column.filter((card) => card.id === id));

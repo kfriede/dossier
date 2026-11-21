@@ -1,6 +1,7 @@
 import "server-only";
 
 import { AgentCandidateStatus, ApplicationOrigin, type Tone } from "@/generated/prisma/enums";
+import type { Prisma } from "@/generated/prisma/client";
 import { ActionError } from "@/lib/action";
 import { summaryText, tailoringSummary } from "@/lib/ai/tailoring-summary";
 import { calendarDay } from "@/lib/application-documents";
@@ -12,6 +13,7 @@ import { newFrame, withFrame } from "@/lib/letter-frame";
 import { prisma } from "@/lib/prisma";
 import { loadProfile } from "@/lib/profile-data";
 import { loadSettings } from "@/lib/settings-data";
+import { resumeFamilySchema, type ResumeFamily } from "@/lib/resume-families";
 
 // Creating an application from finished documents (E7-6), shared by New
 // application and the job agent (E16-5): the Draft application, its resume
@@ -58,14 +60,19 @@ export type CreateApplicationInput = {
   postingUrl: string;
   tone: Tone;
   note: string;
+  resumeFamily?: ResumeFamily;
   claim: ApplicationClaim;
 };
 
 const CLAIMED = "application:";
 
 /** Creates the application once; creating again with the same claim returns the one that exists. */
-export async function createApplicationFromDocuments({ reading, documents, match, details, postingUrl, tone, note, claim }: CreateApplicationInput): Promise<string> {
-  const [settings, profile] = await Promise.all([loadSettings(), loadProfile()]);
+export async function createApplicationFromDocuments(
+  { reading, documents, match, details, postingUrl, tone, note, resumeFamily = "general", claim }: CreateApplicationInput,
+  transaction?: Prisma.TransactionClient,
+): Promise<string> {
+  const db = transaction ?? prisma;
+  const [settings, profile] = await Promise.all([loadSettings(db), loadProfile(db)]);
   const { extracted, extractedWith, matchedWith } = reading;
   const language = settings.docLanguage ?? extracted.language ?? "English";
   // E8-11: every part of the letter is a unit. The AI wrote the recipient
@@ -97,7 +104,7 @@ export async function createApplicationFromDocuments({ reading, documents, match
     showChanges: settings.showDiff,
   });
 
-  const created = await prisma.$transaction(async (tx) => {
+  const persist = async (tx: Prisma.TransactionClient) => {
     if (claim.kind === "manual") {
       // Claim the job first: a second click waits here, then finds it taken.
       const { count } = await tx.job.updateMany({ where: { id: claim.writeJobId, key: null }, data: { key: `${CLAIMED}pending` } });
@@ -133,6 +140,7 @@ export async function createApplicationFromDocuments({ reading, documents, match
         match,
         matchedWith,
         tone,
+        resumeFamily: resumeFamilySchema.parse(resumeFamily),
         // "Anything I should know?" becomes the application's first fact (APP-15).
         ...(note.trim() ? { facts: { create: { text: note.trim() } } } : {}),
         language,
@@ -186,6 +194,7 @@ export async function createApplicationFromDocuments({ reading, documents, match
       await tx.posting.updateMany({ where: { id: claim.postingId, applicationId: null }, data: { applicationId: application.id } });
     }
     return { id: application.id, isNew: true };
-  });
+  };
+  const created = transaction ? await persist(transaction) : await prisma.$transaction(persist);
   return created.id;
 }

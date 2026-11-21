@@ -6,6 +6,7 @@ import type { ProfileData } from "@/lib/profile";
 import type { UsageSink } from "@/lib/usage";
 
 import { postingLines } from "./posting-lines";
+import { evidenceFit, matchEvidence, type RequirementHint } from "./evidence";
 import { askJev, typesafeError, type Answer, type AskOptions, type ChoiceQuestion, type NoulQuestion, type Question, type ScoreQuestion } from "./typesafe";
 
 // Scoring a posting with Jev (#274), in place of the AI model's score-posting.
@@ -14,13 +15,13 @@ import { askJev, typesafeError, type Answer, type AskOptions, type ChoiceQuestio
 // past work is, the level) and the reasons from the posting's own lines:
 // for each, whether it's asked of applicants and whether the profile shows it.
 
-export const SCORE_POSTING_JEV_VERSION = "score-posting-jev@1";
+export const SCORE_POSTING_JEV_VERSION = "score-posting-jev@2";
 
 export type JevPosting = { title: string; company: string; place: string; remote: boolean | null; salary: string; description: string };
 
 const REQUIREMENTS: ScoreQuestion = {
   type: "score",
-  instructions: "How much of what `posting` asks of applicants does `candidate` show?",
+  instructions: "How much of the skills and qualifications `posting` asks for does `candidate` show? Keep eligibility conditions separate; unknown is not a mismatch. Do not add up unrelated work experience. Accept either alternative where the posting permits it.",
   criteria: [
     "Almost nothing the posting asks for shows in the candidate's profile.",
     "A few of the posting's requirements show in the profile; most of the core ones are missing.",
@@ -32,7 +33,7 @@ const REQUIREMENTS: ScoreQuestion = {
 
 const WORK: ScoreQuestion = {
   type: "score",
-  instructions: "How close is the work `candidate` has done, in their roles and projects, to the day-to-day work of the job in `posting`?",
+  instructions: "How close are the candidate's documented duties to the day-to-day work of the job? Do not count unrelated roles or assume an entire career is relevant.",
   criteria: [
     "Unrelated: the candidate has done a different kind of work, in a different field.",
     "Loosely related: some overlap in tools or field, but the job's main work would be new to the candidate.",
@@ -236,9 +237,16 @@ export async function scoreWithJev(
   posting: JevPosting,
   profile: ProfileData,
   { onUsage, ...options }: AskOptions & { onUsage?: UsageSink },
-): Promise<{ data: PostingFit; scoredWith: string }> {
+): Promise<{ data: PostingFit; scoredWith: string; hints: RequirementHint[] }> {
   const lines = postingLines(posting.description);
   const result = await askJev({ state: jevState(posting, profile), questions: jevQuestions(lines) }, options);
   onUsage?.({ task: "score-posting-jev", provider: "JEV", model: result.model, input: result.usage?.input_tokens ?? null, output: null });
-  return { data: jevFit(jevParts(result.answers, lines)), scoredWith: `${SCORE_POSTING_JEV_VERSION} (${result.model})` };
+  const parts = jevParts(result.answers, lines);
+  const hints: RequirementHint[] = parts.lines.flatMap((line, index) => {
+    const answer = result.answers[`line${index}Kind`];
+    return line.kind !== "other" && answer?.type === "choice" && answer.confidence >= 0.7
+      ? [{ text: line.text, importance: line.kind }]
+      : [];
+  });
+  return { data: evidenceFit(matchEvidence(posting.description, profile, new Date(), hints)), scoredWith: `${SCORE_POSTING_JEV_VERSION} (${result.model})`, hints };
 }

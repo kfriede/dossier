@@ -1,6 +1,6 @@
 import "server-only";
 
-import type { ApplicationStatus } from "@/generated/prisma/enums";
+import { ApplicationStatus, DocumentKind } from "@/generated/prisma/enums";
 import { matchSchema, matchScore } from "@/lib/application-data";
 import { resumeFitSchema } from "@/lib/resume-fit";
 import { sortRows, updatedAgo, type Sort } from "@/lib/applications-list";
@@ -30,6 +30,9 @@ export type ApplicationRow = {
   updatedAt: number;
   /** Its place in its board column; null until reordered (public issue 60). */
   boardSort: number | null;
+  /** Its operator-controlled place in the application queue; null until reordered. */
+  queueSort: number | null;
+  hasRecipientDocuments: boolean;
 };
 
 /** Every application, archived ones only when asked for, sorted for the table; agent drafts once approved (#195). */
@@ -51,6 +54,8 @@ export async function loadApplicationRows({ archived, sort }: { archived: boolea
       sentAt: true,
       updatedAt: true,
       boardSort: true,
+      queueSort: true,
+      documents: { where: { kind: { in: [DocumentKind.RESUME, DocumentKind.COVER_LETTER] } }, select: { id: true } },
     },
   });
   const rows = applications.map((application) => {
@@ -70,6 +75,8 @@ export async function loadApplicationRows({ archived, sort }: { archived: boolea
       sentAt: application.sentAt,
       updatedAt: application.updatedAt,
       boardSort: application.boardSort,
+      queueSort: application.queueSort,
+      hasRecipientDocuments: application.documents.length > 0,
     };
   });
   return sortRows(rows, sort).map(({ sentAt, updatedAt, ...row }): ApplicationRow => ({

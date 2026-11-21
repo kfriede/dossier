@@ -17,10 +17,14 @@ import { useAutosave } from "@/hooks/use-autosave";
 import { listAiModels, saveAiProvider, saveApiKey, testAiConnection } from "./actions";
 import { SettingsSectionIntro } from "./settings-screen";
 
+type TestOutcome =
+  | { connected: true; model: string; seconds: number }
+  | { connected: false; message: string };
+
 type Connection =
   | { status: "untested" }
   | { status: "testing" }
-  | { status: "connected"; model: string; seconds: number }
+  | { status: "tested"; text: TestOutcome; structured: TestOutcome }
   | { status: "failed"; message: string };
 
 type ModelList = { loading: true } | { loading: false; models: string[]; problem: string | null };
@@ -49,6 +53,7 @@ export function AiProviderSection({ initial }: { initial: AiSettingsView }) {
   const [keyInput, setKeyInput] = useState("");
   const [otherModel, setOtherModel] = useState(false);
   const [urlLeft, setUrlLeft] = useState(false);
+  const [setupPreset, setSetupPreset] = useState<"litellm" | "">("");
   const [connection, setConnection] = useState<Connection>({ status: "untested" });
   const [modelList, setModelList] = useState<ModelList>({ loading: true });
   const option = providerOption(provider);
@@ -101,6 +106,7 @@ export function AiProviderSection({ initial }: { initial: AiSettingsView }) {
     setModel(nextOption.defaultModel);
     setOtherModel(false);
     setUrlLeft(false);
+    setSetupPreset("");
     setKeyInput("");
     changed();
     setSaveNow((count) => count + 1);
@@ -123,8 +129,7 @@ export function AiProviderSection({ initial }: { initial: AiSettingsView }) {
     setConnection({ status: "testing" });
     const result = await testAiConnection({});
     if (!result.ok) setConnection({ status: "failed", message: result.error });
-    else if (result.data.connected) setConnection({ status: "connected", model: result.data.model, seconds: result.data.seconds });
-    else setConnection({ status: "failed", message: result.data.message });
+    else setConnection({ status: "tested", text: result.data.text, structured: result.data.structured });
   };
 
   const models = [...new Set([...(modelList.loading ? [] : modelList.models), model].filter(Boolean))];
@@ -175,6 +180,26 @@ export function AiProviderSection({ initial }: { initial: AiSettingsView }) {
       )}
 
       <Card className="grid grid-cols-1 gap-x-[18px] gap-y-5 sm:grid-cols-2">
+        {provider === "OPENAI" && (
+          <div className="flex flex-col gap-2.5 sm:col-span-2">
+            <Select
+              label="Setup preset"
+              value={setupPreset}
+              onChange={(event) => setSetupPreset(event.target.value as typeof setupPreset)}
+            >
+              <option value="">Custom OpenAI-compatible server</option>
+              <option value="litellm">LiteLLM gateway</option>
+            </Select>
+            {setupPreset === "litellm" && (
+              <p role="note" className="text-meta text-muted">
+                Enter the full OpenAI-compatible API base URL, usually ending in /v1. Keep any custom path prefix; Dossier will not
+                guess the address or add /v1. In Docker, localhost is the Dossier container, so use an address it can reach. Enter
+                the LiteLLM model alias exactly as configured, without a provider prefix. Use a restricted LiteLLM virtual key, not
+                an upstream provider key or the gateway&apos;s admin key.
+              </p>
+            )}
+          </div>
+        )}
         <Input
           className="sm:col-span-2"
           label="Server address"
@@ -192,9 +217,11 @@ export function AiProviderSection({ initial }: { initial: AiSettingsView }) {
             flush();
           }}
           hint={
-            urlLeft && baseUrl.trim() && !looksLikeUrl(baseUrl)
-              ? "Start the address with http:// or https://."
-              : option.urlHint
+            setupPreset === "litellm"
+              ? "Use the complete gateway API base URL. Dossier uses its path as entered."
+              : urlLeft && baseUrl.trim() && !looksLikeUrl(baseUrl)
+                ? "Start the address with http:// or https://."
+                : option.urlHint
           }
         />
 
@@ -212,7 +239,13 @@ export function AiProviderSection({ initial }: { initial: AiSettingsView }) {
               changed();
               setSaveNow((count) => count + 1);
             }}
-            hint={!modelList.loading && modelList.problem ? `Couldn't list the models: ${modelList.problem}` : undefined}
+            hint={
+              !modelList.loading && modelList.problem
+                ? `Couldn't list the models: ${modelList.problem}`
+                : setupPreset === "litellm"
+                  ? "Use the exact model alias from LiteLLM. Manual entry works when model listing is unavailable."
+                  : undefined
+            }
           >
             {!model && !otherModel && <option value="">{modelList.loading ? "Loading models…" : "Choose a model"}</option>}
             {models.map((name) => (
@@ -242,7 +275,13 @@ export function AiProviderSection({ initial }: { initial: AiSettingsView }) {
           <div className="flex flex-col gap-2.5">
             <Input
               label={option.apiKey.label}
-              hint={keyState === "unreadable" ? undefined : option.apiKey.hint}
+              hint={
+                keyState === "unreadable"
+                  ? undefined
+                  : setupPreset === "litellm"
+                    ? "Use a restricted LiteLLM virtual key. Do not use an upstream provider key or gateway admin key."
+                    : option.apiKey.hint
+              }
               type="password"
               autoComplete="off"
               value={keyInput}
@@ -290,14 +329,20 @@ export function AiProviderSection({ initial }: { initial: AiSettingsView }) {
 }
 
 function ConnectionStatus({ connection }: { connection: Connection }) {
+  if (connection.status === "tested") {
+    return (
+      <div role="status" className="flex flex-col gap-1 text-control sm:col-span-2">
+        <ConnectionLine label="Text completion" outcome={connection.text} />
+        <ConnectionLine label="Schema-constrained response" outcome={connection.structured} />
+      </div>
+    );
+  }
   const [dot, text, message] =
-    connection.status === "connected"
-      ? ["bg-success", "text-success", `Connected · ${connection.model} answered in ${connection.seconds.toLocaleString("en-US")} s`]
-      : connection.status === "failed"
-        ? ["bg-error", "text-error", connection.message]
-        : connection.status === "testing"
-          ? ["bg-status-offer", "text-muted", "Sending a short test prompt…"]
-          : ["bg-faint", "text-muted", "Not tested since your last change"];
+    connection.status === "failed"
+      ? ["bg-error", "text-error", connection.message]
+      : connection.status === "testing"
+        ? ["bg-status-offer", "text-muted", "Testing text completion and structured output…"]
+        : ["bg-faint", "text-muted", "Not tested since your last change"];
   return (
     <p role="status" className={cn("flex items-start gap-2 text-control", text)}>
       {/* One line high, so the dot stays by the first line when the message wraps. */}
@@ -305,6 +350,15 @@ function ConnectionStatus({ connection }: { connection: Connection }) {
         <span className={cn("size-2 rounded-full", dot)} />
       </span>
       {message}
+    </p>
+  );
+}
+
+function ConnectionLine({ label, outcome }: { label: string; outcome: TestOutcome }) {
+  const connected = outcome.connected;
+  return (
+    <p className={cn(connected ? "text-success" : "text-error")}>
+      {label}: {connected ? `connected · ${outcome.model} answered in ${outcome.seconds.toLocaleString("en-US")} s` : `failed · ${outcome.message}`}
     </p>
   );
 }

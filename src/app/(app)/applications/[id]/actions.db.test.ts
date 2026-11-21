@@ -1,9 +1,15 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { applyStatusChange } from "@/lib/status-changes";
+import { DocumentProposalStatus, VersionCause } from "@/generated/prisma/enums";
+import { documentRevision } from "@/lib/connector/revisions";
+import { profileRevision } from "@/lib/connector/write";
+import { loadProfile } from "@/lib/profile-data";
+import { loadSettings } from "@/lib/settings-data";
 import { createTestClient, resetDatabase } from "@/test/db";
 
 import {
+  approveDocumentProposal,
   addApplicationSection,
   addMatchSkill,
   addNote,
@@ -16,6 +22,7 @@ import {
   restoreNote,
   restoreUnit,
   restoreVersion,
+  rejectDocumentProposal,
   saveUnit,
   sendMessage,
   setApplicationSections,
@@ -85,7 +92,120 @@ beforeEach(async () => {
 const units = async () =>
   (await prisma().document.findUniqueOrThrow({ where: { applicationId_kind: { applicationId: "app-1", kind: "RESUME" } } }))
     .units as typeof resume;
+
+async function createProposal({
+  expectedDocumentRevision,
+  expectedProfileRevision,
+}: {
+  expectedDocumentRevision?: string;
+  expectedProfileRevision?: string;
+} = {}) {
+  const document = await prisma().document.findUniqueOrThrow({
+    where: { applicationId_kind: { applicationId: "app-1", kind: "RESUME" } },
+  });
+  const [profile, settings] = await Promise.all([loadProfile(), loadSettings()]);
+  return prisma().documentProposal.create({
+    data: {
+      applicationId: "app-1",
+      documentId: document.id,
+      expectedDocumentRevision: expectedDocumentRevision ?? documentRevision(document),
+      expectedProfileRevision: expectedProfileRevision ?? profileRevision(profile, settings.resumeSections),
+      proposedUnits: [
+        { id: "summary", label: "Summary", text: "Clear tools for complex work." },
+        { id: "experience:e1", label: "Northwind role", text: "Led the portal\nBuilt the design system" },
+      ],
+      sourceContext: { source: "connector", url: "https://jobs.example/role" },
+      warnings: ["Check the proposed summary."],
+    },
+  });
+}
 afterAll(() => prisma().$disconnect());
+
+describe("external document proposals", () => {
+  it("applies an approved revision with restorable history, leaving application status and sent copy alone", async () => {
+    const sentCopy = { resume: [{ id: "summary", text: "The sent version." }] };
+    await prisma().application.update({ where: { id: "app-1" }, data: { status: "SENT", frozen: sentCopy } });
+    const proposal = await createProposal();
+
+    expect(await approveDocumentProposal({ id: "app-1", proposalId: proposal.id })).toMatchObject({
+      ok: true,
+      data: { result: "approved" },
+    });
+    expect(await units()).toMatchObject([
+      { id: "summary", text: "Clear tools for complex work." },
+      { id: "experience:e1", text: "Led the portal\nBuilt the design system" },
+    ]);
+    expect(await prisma().documentProposal.findUniqueOrThrow({ where: { id: proposal.id } })).toMatchObject({
+      status: DocumentProposalStatus.APPROVED,
+      resolvedAt: expect.any(Date),
+    });
+    const versions = await prisma().documentVersion.findMany({ where: { documentId: proposal.documentId }, orderBy: { createdAt: "asc" } });
+    expect(versions).toMatchObject([
+      { cause: VersionCause.BEFORE_PROPOSAL, units: resume },
+      { cause: VersionCause.PROPOSED, units: [{ id: "summary", label: "Summary", text: "Clear tools for complex work." }, expect.any(Object)] },
+    ]);
+    expect(await restoreVersion({ id: "app-1", versionId: versions[0].id })).toMatchObject({ ok: true });
+    expect(await units()).toEqual(resume);
+    expect(await prisma().documentVersion.findMany({ where: { documentId: proposal.documentId }, orderBy: { createdAt: "desc" }, select: { cause: true } })).toMatchObject([
+      { cause: VersionCause.RESTORED },
+      { cause: VersionCause.PROPOSED },
+      { cause: VersionCause.BEFORE_PROPOSAL },
+    ]);
+    expect(await prisma().application.findUniqueOrThrow({ where: { id: "app-1" }, select: { status: true, frozen: true } })).toEqual({
+      status: "SENT",
+      frozen: sentCopy,
+    });
+  });
+
+  it("marks a proposal stale when its document revision no longer matches", async () => {
+    const proposal = await createProposal({ expectedDocumentRevision: "sha256:old" });
+    const original = await units();
+
+    expect(await approveDocumentProposal({ id: "app-1", proposalId: proposal.id })).toMatchObject({
+      ok: true,
+      data: { result: "stale" },
+    });
+
+    expect(await units()).toEqual(original);
+    expect(await prisma().documentProposal.findUniqueOrThrow({ where: { id: proposal.id } })).toMatchObject({
+      status: DocumentProposalStatus.STALE,
+      resolvedAt: expect.any(Date),
+    });
+    expect(await prisma().documentVersion.count({ where: { documentId: proposal.documentId } })).toBe(0);
+  });
+
+  it("marks a proposal stale when the profile revision no longer matches", async () => {
+    const proposal = await createProposal({ expectedProfileRevision: "sha256:old" });
+    const original = await units();
+
+    expect(await approveDocumentProposal({ id: "app-1", proposalId: proposal.id })).toMatchObject({
+      ok: true,
+      data: { result: "stale" },
+    });
+    expect(await units()).toEqual(original);
+    expect(await prisma().documentProposal.findUniqueOrThrow({ where: { id: proposal.id } })).toMatchObject({
+      status: DocumentProposalStatus.STALE,
+    });
+    expect(await prisma().documentVersion.count({ where: { documentId: proposal.documentId } })).toBe(0);
+  });
+
+  it("rejects a pending proposal without changing its document or application", async () => {
+    const proposal = await createProposal();
+    const original = await units();
+
+    expect(await rejectDocumentProposal({ id: "app-1", proposalId: proposal.id })).toEqual({ ok: true, data: null, toast: "Proposal rejected." });
+    expect(await units()).toEqual(original);
+    expect(await prisma().documentProposal.findUniqueOrThrow({ where: { id: proposal.id } })).toMatchObject({
+      status: DocumentProposalStatus.REJECTED,
+      resolvedAt: expect.any(Date),
+    });
+    expect(await prisma().documentVersion.count({ where: { documentId: proposal.documentId } })).toBe(0);
+    expect(await prisma().application.findUniqueOrThrow({ where: { id: "app-1" }, select: { status: true, frozen: true } })).toEqual({
+      status: "DRAFT",
+      frozen: null,
+    });
+  });
+});
 
 describe("setFollowThemeLayout (E8-2)", () => {
   it("saves the layout switch on the application", async () => {

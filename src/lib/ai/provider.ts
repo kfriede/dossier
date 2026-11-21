@@ -1,4 +1,4 @@
-import { prettifyError, toJSONSchema, type z } from "zod";
+import { prettifyError, toJSONSchema, z } from "zod";
 
 import type { AiProvider as AiProviderKind, Creativity } from "@/generated/prisma/enums";
 
@@ -48,6 +48,8 @@ export interface AIProvider {
   listModels(signal?: AbortSignal): Promise<string[]>;
   /** Sends a tiny prompt and reports how long the answer took (SET-2). */
   test(signal?: AbortSignal): Promise<{ model: string; latencyMs: number }>;
+  /** Checks that the model can return a schema-validated JSON answer. */
+  testStructured(signal?: AbortSignal): Promise<{ model: string; latencyMs: number }>;
 }
 
 /** What a provider implementation gets for one call. */
@@ -165,6 +167,21 @@ export abstract class BaseProvider implements AIProvider {
       system: "You are a connection check. Answer with the single word OK.",
       messages: [{ role: "user", content: "Are you there?" }],
       maxTokens: 16,
+      signal,
+    });
+    return { model, latencyMs: Math.round(performance.now() - started) };
+  }
+
+  async testStructured(signal?: AbortSignal): Promise<{ model: string; latencyMs: number }> {
+    const model = this.requireModel();
+    const started = performance.now();
+    await this.complete({
+      task: "connection-check",
+      system: "You are a structured-output connection check. Return the required JSON object.",
+      messages: [{ role: "user", content: "Confirm structured output by returning connected=true." }],
+      schema: z.object({ connected: z.literal(true) }),
+      schemaName: "connection_check",
+      maxTokens: 64,
       signal,
     });
     return { model, latencyMs: Math.round(performance.now() - started) };

@@ -105,6 +105,21 @@ describe("OpenAICompatibleProvider", () => {
     expect(requests[0].body).toMatchObject({ model: "gpt-x", temperature: 0.9, max_tokens: 4096 });
   });
 
+  it("passes LiteLLM aliases and base paths through unchanged", async () => {
+    const requests = stubFetch(() => openaiChat("OK"));
+    const addresses = [
+      ["https://gateway.example/v1", "/v1/chat/completions"],
+      ["https://gateway.example/v1/", "/v1/chat/completions"],
+      ["https://gateway.example/litellm/openai/v1", "/litellm/openai/v1/chat/completions"],
+    ];
+    for (const [baseURL, path] of addresses) {
+      const provider = new OpenAICompatibleProvider("OPENAI", baseURL, "sk-virtual", "team/model-alias", 60_000);
+      expect(await provider.complete(ask)).toBe("OK");
+      expect(requests.at(-1)?.url.pathname).toBe(path);
+      expect(requests.at(-1)?.body).toMatchObject({ model: "team/model-alias" });
+    }
+  });
+
   it("asks for a strict JSON schema", async () => {
     const requests = stubFetch(() => openaiChat('{"name":"Jane","years":9}'));
     const provider = new OpenAICompatibleProvider("OPENAI", "https://api.example.com/v1", "sk-test", "gpt-x", 60_000);
@@ -659,6 +674,14 @@ describe("test()", () => {
       kind: "config",
       message: "Choose a model in Settings → AI provider first.",
     });
+  });
+
+  it("tests structured output with schema validation", async () => {
+    const provider = new MockProvider({ model: "alias", reply: (call) => (call.json ? { connected: true } : "OK") });
+    await expect(provider.testStructured()).resolves.toEqual({ model: "alias", latencyMs: expect.any(Number) });
+
+    const invalid = new MockProvider({ reply: () => ({ connected: false }) });
+    expect(await failure(invalid.testStructured())).toMatchObject({ kind: "invalid-output" });
   });
 });
 

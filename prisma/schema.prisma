@@ -490,6 +490,8 @@ model Application {
   status              ApplicationStatus @default(DRAFT)
   /// Its place in its board column; null until reordered, and again after a status change. Null comes first, newest first.
   boardSort           Int?
+  /// The operator's place in the application queue; null until reordered.
+  queueSort           Int?
   /// The furthest stage ever reached; null while never sent. Only the status module changes it.
   furthestStage       FunnelStage?
   sentAt              DateTime?
@@ -498,6 +500,8 @@ model Application {
   tone                Tone              @default(WARM)
   /// The language the documents were written in, e.g. "English".
   language            String            @default("")
+  /// Role-family emphasis used when tailoring this resume.
+  resumeFamily        String            @default("general")
   /// The tailored resume follows its theme's layout, sidebar included; off
   /// means a single column (APP-4, decided in E5-1 #42).
   followThemeLayout   Boolean           @default(false)
@@ -519,6 +523,7 @@ model Application {
   posting             Posting?
   /// The agent candidate it was prepared from (E16).
   agentCandidate      AgentCandidate?
+  proposals           DocumentProposal[]
   /// The startup it was started from on Startups, if any (#222).
   startup             Startup?
   /// Mail sent and received about it through Gmail (E15-3).
@@ -578,6 +583,7 @@ model Document {
   trimmed       Json?
   /// Earlier states, after each AI change and before each restore (E8-10).
   versions      DocumentVersion[]
+  proposals     DocumentProposal[]
   updatedAt     DateTime          @updatedAt
 
   @@unique([applicationId, kind])
@@ -599,6 +605,36 @@ enum VersionCause {
   BEFORE_RESTORE
   /// An earlier version brought back.
   RESTORED
+  /// Saved immediately before applying an external proposal.
+  BEFORE_PROPOSAL
+  /// A user-approved external document proposal.
+  PROPOSED
+}
+
+enum DocumentProposalStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  STALE
+}
+
+/// A connector-written revision waiting for review in the authenticated UI.
+model DocumentProposal {
+  id                       String                 @id @default(cuid())
+  applicationId            String
+  application              Application            @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  documentId               String
+  document                 Document               @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  expectedDocumentRevision String
+  expectedProfileRevision  String
+  proposedUnits            Json
+  sourceContext            Json
+  warnings                 Json
+  status                   DocumentProposalStatus @default(PENDING)
+  createdAt                DateTime               @default(now())
+  resolvedAt               DateTime?
+
+  @@index([applicationId, status, createdAt])
 }
 
 /// A tailored document's units as they were at one point (E8-10).
@@ -662,6 +698,7 @@ enum PostingSource {
   ADZUNA
   ARBEITSAGENTUR
   FREEHIRE
+  IMPORTED
 }
 
 /// A posting from Find jobs that the user kept (E14-5): saved, dismissed, or
@@ -687,6 +724,13 @@ model Posting {
   description   String        @default("")
   /// False while the description is only the start of the posting.
   complete      Boolean       @default(false)
+  /// Unverified source context supplied by the importing connector.
+  requisitionId String?
+  sourceKind    String?
+  sourceUrl     String?
+  reportedRetrievedAt DateTime?
+  reportedCheckedAt   DateTime?
+  researchNotes String?
   savedAt       DateTime?
   /// Dismissed postings stay out of later searches.
   dismissedAt   DateTime?
@@ -699,6 +743,21 @@ model Posting {
   @@unique([source, externalId])
   @@index([savedAt])
   @@index([dismissedAt])
+  @@index([source, company])
+}
+
+/// Short-lived idempotency receipts for writes made by an authenticated connector.
+model ConnectorWriteReceipt {
+  id             String   @id @default(cuid())
+  clientId       String
+  operation      String
+  idempotencyKey String
+  payloadHash    String
+  result         Json
+  createdAt      DateTime @default(now())
+
+  @@unique([clientId, operation, idempotencyKey])
+  @@index([createdAt])
 }
 
 /// A posting pasted into New application and handed to Claude chat (#221):
@@ -801,6 +860,8 @@ model PostingScore {
   /// JSON lists of strings.
   reasons    Json
   redFlags   Json
+  /// Validated requirement and evidence spans, including unresolved questions.
+  evidence   Json?
   /// What scored it: the prompt version, e.g. "score-posting@1", or Jev's, e.g. "score-posting-jev@1 (jev-1.14.0)".
   scoredWith String
   createdAt  DateTime      @default(now())

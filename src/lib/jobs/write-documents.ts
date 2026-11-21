@@ -11,6 +11,7 @@ import { loadProfile } from "@/lib/profile-data";
 import { withoutSectionsOff } from "@/lib/resume-sections";
 import { DOCUMENTS_TO_WRITE } from "@/lib/settings";
 import { loadSettings } from "@/lib/settings-data";
+import { resumeFamilySchema } from "@/lib/resume-families";
 
 import { WRITE_DOCUMENTS_STEPS } from "./application-steps";
 import { defineJob } from "./runner";
@@ -36,9 +37,10 @@ export const writeDocumentsJob = defineJob({
     note: z.string().max(2000),
     /** Which documents to write (#367); the job agent and the connector write both. */
     write: z.enum(DOCUMENTS_TO_WRITE).default("both"),
+    resumeFamily: resumeFamilySchema.default("general"),
   }),
   result: z.object({ resume: unitsSchema, resumeWith: z.string(), letter: unitsSchema, letterWith: z.string() }),
-  async run({ posting, extracted, match, tone, note, write }, { step, signal }) {
+  async run({ posting, extracted, match, tone, note, write, resumeFamily }, { step, signal }) {
     await step(write === "letter" ? WRITE_DOCUMENTS_STEPS[1] : WRITE_DOCUMENTS_STEPS[0]);
     const [provider, options, fullProfile, settings] = await Promise.all([getAiProvider(), loadTaskOptions(), loadProfile(), loadSettings()]);
     // A section that's off on the base resume isn't written about (#297).
@@ -50,7 +52,7 @@ export const writeDocumentsJob = defineJob({
     const resume =
       write === "letter"
         ? skipped
-        : await tailorResume(provider, { profile, extracted, match, facts, posting, keepSkillOrder: settings.skillOrder === "manual" }, { ...options, signal });
+        : await tailorResume(provider, { profile, extracted, match, facts, posting, resumeFamily, keepSkillOrder: settings.skillOrder === "manual" }, { ...options, signal });
 
     if (write === "both") await step(WRITE_DOCUMENTS_STEPS[1]);
     const letter = write === "resume" ? skipped : await writeCoverLetter(provider, { profile, extracted, match, tone, facts, posting }, { ...options, signal });

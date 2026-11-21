@@ -9,7 +9,12 @@ import { rememberListView } from "./actions";
 import { ApplicationsScreen, type ApplicationsScreenProps } from "./applications-screen";
 
 const router = vi.hoisted(() => ({ push: vi.fn(), replace: vi.fn(), refresh: vi.fn() }));
-vi.mock("./actions", () => ({ rememberListView: vi.fn(async () => ({ ok: true, data: null })), reorderBoard: vi.fn(async () => ({ ok: true, data: null })) }));
+vi.mock("./actions", () => ({
+  rememberListView: vi.fn(async () => ({ ok: true, data: null })),
+  reorderBoard: vi.fn(async () => ({ ok: true, data: null })),
+  reorderQueue: vi.fn(async () => ({ ok: true, data: null })),
+  startRecipientHandoff: vi.fn(async () => ({ ok: true, data: "job-1" })),
+}));
 vi.mock("next/navigation", () => ({ useRouter: () => router, usePathname: () => null }));
 
 export const row = (id: string, extra: Partial<ApplicationRow> = {}): ApplicationRow => ({
@@ -27,6 +32,8 @@ export const row = (id: string, extra: Partial<ApplicationRow> = {}): Applicatio
   updated: "2 days ago",
   updatedAt: Date.UTC(2026, 8, 26),
   boardSort: null,
+  queueSort: null,
+  hasRecipientDocuments: true,
   ...extra,
 });
 
@@ -52,6 +59,7 @@ describe("the Applications screen (E9-1)", () => {
     expect(screen.getByRole("heading", { level: 1, name: "Applications" })).toBeInTheDocument();
     expect(screen.getByText(props.summary)).toBeInTheDocument();
     expect(screen.getByRole("radio", { name: "Board" })).toBeChecked();
+    expect(screen.getByRole("radio", { name: "Queue" })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: "+ New application" })).toHaveAttribute("href", "/new?fresh=1");
     expect(screen.getByText("Drag a card to reorder it or change its status")).toBeInTheDocument();
   });
@@ -69,6 +77,13 @@ describe("the Applications screen (E9-1)", () => {
     render(<ApplicationsScreen {...props} />);
     await user.click(screen.getByRole("radio", { name: "Table" }));
     expect(router.push).toHaveBeenCalledWith("/applications?view=table", { scroll: false });
+  });
+
+  it("switches to the independently ordered queue", async () => {
+    const user = userEvent.setup();
+    render(<ApplicationsScreen {...props} />);
+    await user.click(screen.getByRole("radio", { name: "Queue" }));
+    expect(router.push).toHaveBeenCalledWith("/applications?view=queue", { scroll: false });
   });
 
   it("searches once typing pauses, without piling up history", async () => {

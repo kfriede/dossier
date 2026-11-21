@@ -17,6 +17,7 @@ import { prisma } from "@/lib/prisma";
 import { loadFactTexts, loadProfile } from "@/lib/profile-data";
 import { sectionLayoutSchema, withoutSectionsOff } from "@/lib/resume-sections";
 import { loadSettings } from "@/lib/settings-data";
+import { resumeFamilySchema } from "@/lib/resume-families";
 
 import { defineJob } from "./runner";
 
@@ -60,7 +61,11 @@ export const writeDocumentJob = defineJob({
     let units: Unit[];
     let writtenWith: string;
     if (kind === DocumentKind.RESUME) {
-      const resume = await tailorResume(provider, { profile, extracted, match, facts, posting, keepSkillOrder: settings.skillOrder === "manual" }, taskOptions);
+      const resume = await tailorResume(
+        provider,
+        { profile, extracted, match, facts, posting, resumeFamily: resumeFamilySchema.parse(application.resumeFamily), keepSkillOrder: settings.skillOrder === "manual" },
+        taskOptions,
+      );
       units = resume.data;
       writtenWith = resume.promptVersion;
     } else {

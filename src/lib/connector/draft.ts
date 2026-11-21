@@ -42,7 +42,16 @@ export const connectorDraftJob = defineJob({
     const reading = await readPostingJob.run({ posting }, context);
     const settings = await loadSettings();
     const documents = await writeDocumentsJob.run(
-      { readJobId: context.id, posting, extracted: reading.extracted, match: reading.match, tone: settings.defaultTone, note, write: "both" },
+      {
+        readJobId: context.id,
+        posting,
+        extracted: reading.extracted,
+        match: reading.match,
+        tone: settings.defaultTone,
+        note,
+        write: "both",
+        resumeFamily: "general",
+      },
       context,
     );
     const applicationId = await createApplicationFromDocuments({
@@ -53,6 +62,7 @@ export const connectorDraftJob = defineJob({
       postingUrl,
       tone: settings.defaultTone,
       note,
+      resumeFamily: "general",
       // This job claims it, as New application's write job does, so a retry can't make two.
       claim: { kind: "manual", writeJobId: context.id, readJobId: context.id, postingId },
     });

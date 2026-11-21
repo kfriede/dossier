@@ -8,6 +8,7 @@ import { setupGuideSchema } from "@/lib/setup-guide";
 import { SCORERS } from "@/lib/scoring/scorers";
 import { startupsRefreshSchema } from "@/lib/startups/types";
 import { AGENT_MAX_SOURCE_REQUESTS_PER_DAY } from "@/lib/agent/limits";
+import { DEFAULT_SEARCH_PREFERENCES, searchPreferencesSchema } from "@/lib/job-search/preferences";
 
 /** Date styles for documents (SET-6), labelled with an example as in the prototype. */
 export const DATE_FORMATS: readonly { value: DateFormat; label: string }[] = [
@@ -137,7 +138,7 @@ export const settingsSchema = z.object({
   /** A theme's id. loadSettings() reads a deleted one as Editorial. */
   baseThemeId: z.string().catch(DEFAULT_BASE_THEME),
   /** The Applications screen as last left (LST-7): view, filter and sort, e.g. "-match". */
-  applicationsView: z.enum(["board", "table"]).catch("board"),
+  applicationsView: z.enum(["board", "table", "queue"]).catch("board"),
   applicationsFilter: z.enum(["all", "active", "closed"]).catch("all"),
   applicationsSort: z.string().catch("updated"),
   /** The dashboard's period as last left (E9-8). */
@@ -162,6 +163,7 @@ export const settingsSchema = z.object({
   // decides. "OFF" is a choice. Each source keeps its own key, encrypted
   // like the AI key, so switching back and forth loses nothing.
   jobSource: z.enum([...JOB_SOURCES, "OFF"]).nullable().catch(null),
+  searchPreferences: json(searchPreferencesSchema).catch(DEFAULT_SEARCH_PREFERENCES),
   jsearchKeyEnc: z.string().nullable().catch(null),
   /** Where the JSearch key is from: OpenWeb Ninja, or the RapidAPI marketplace. */
   jsearchHost: z.enum(JSEARCH_HOSTS).catch("openwebninja"),

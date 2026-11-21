@@ -9,6 +9,7 @@ import { countSearches, listSearches, loadSearch } from "@/lib/posting-searches"
 import { countPostings, listPostings } from "@/lib/postings";
 import { prisma } from "@/lib/prisma";
 import { userTimeZone } from "@/lib/time-zone";
+import { loadSettings } from "@/lib/settings-data";
 
 import { JobsScreen } from "./jobs-screen";
 
@@ -26,12 +27,13 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
   const view = viewFromParams(params);
   const typed = queryFromParams(params);
   const searchId = typeof params.search === "string" ? params.search : undefined;
-  const [config, timeZone, postingCounts, searches, scoreInClaude] = await Promise.all([
+  const [config, timeZone, postingCounts, searches, scoreInClaude, settings] = await Promise.all([
     loadJobSearchConfig(),
     userTimeZone(),
     countPostings(),
     countSearches(),
     isAiUsable().then(handsOffToClaude),
+    loadSettings(),
   ]);
   const now = new Date();
 
@@ -46,6 +48,7 @@ export default async function JobsPage({ searchParams }: PageProps<"/jobs">) {
       source={config.source}
       arbeitsagenturNote={config.source === "ARBEITSAGENTUR" && !config.arbeitsagentur.acceptedAt}
       scoreInClaude={scoreInClaude}
+      preferences={settings.searchPreferences}
       // Named here: the browser's ICU can name a few countries differently from the server's.
       countries={COUNTRIES}
       view={view}

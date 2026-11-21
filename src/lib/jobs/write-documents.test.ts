@@ -29,11 +29,11 @@ describe("writeDocumentsJob (E7-6)", () => {
       requirements: [], asksForReferences: false, language: "English",
     };
     const result = await writeDocumentsJob.run(
-      { readJobId: "read-job", posting: "Ledgerly is hiring.", extracted, match: { items: [] }, tone: "WARM", note: "", write: "both" },
+      { readJobId: "read-job", posting: "Ledgerly is hiring.", extracted, match: { items: [] }, tone: "WARM", note: "", write: "both", resumeFamily: "general" },
       { id: "test-job", step: async (name) => void steps.push(name), signal: new AbortController().signal },
     );
     expect(steps).toEqual(WRITE_DOCUMENTS_STEPS.slice(0, 2));
-    expect(result.resumeWith).toBe("tailor-resume@9");
+    expect(result.resumeWith).toBe("tailor-resume@10");
     expect(result.letterWith).toBe("write-cover-letter@6");
     // Strict mode: the fact guard marks what the profile doesn't back.
     expect(result.resume[0]).toMatchObject({ id: "summary", unverified: ["Google"] });
@@ -56,11 +56,11 @@ describe("writeDocumentsJob (E7-6)", () => {
     };
     const steps: string[] = [];
     const context = { id: "test-job", step: async (name: string) => void steps.push(name), signal: new AbortController().signal };
-    const input = { readJobId: "read-job", posting: "Ledgerly is hiring.", extracted, match: { items: [] }, tone: "WARM" as const, note: "" };
+    const input = { readJobId: "read-job", posting: "Ledgerly is hiring.", extracted, match: { items: [] }, tone: "WARM" as const, note: "", resumeFamily: "general" as const };
 
     const resumeOnly = await writeDocumentsJob.run({ ...input, write: "resume" }, context);
     expect(asked).toEqual(["tailored_resume"]);
-    expect(resumeOnly).toMatchObject({ letter: [], letterWith: "", resumeWith: "tailor-resume@9" });
+    expect(resumeOnly).toMatchObject({ letter: [], letterWith: "", resumeWith: "tailor-resume@10" });
 
     asked.length = 0;
     steps.length = 0;

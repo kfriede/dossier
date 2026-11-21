@@ -247,6 +247,16 @@ describe("tailorResume", () => {
     expect(sent(provider).effort).toBeUndefined();
   });
 
+  it("uses the chosen role-family emphasis without relaxing evidence guardrails", async () => {
+    const provider = model(answer);
+    await tailorResume(provider, { profile, extracted, match: null, facts: [], posting, resumeFamily: "engineering" }, options);
+    const text = prompt(provider);
+    expect(text).toContain("Role-family emphasis: technical decisions, implementation, architecture, reliability, and measurable delivery.");
+    expect(text).toContain("Use only evidence already present in the candidate's profile and posting");
+    expect(text).toContain("Prioritize the strongest supported evidence for the job's most important requirements across the summary, experience, projects and skills.");
+    expect(text).toContain("Never invent or embellish an employer");
+  });
+
   it("keeps the profile's order of skills when the user set one, and the model's ranking otherwise (public issue 62)", async () => {
     const ranked = await tailorResume(model(answer), { profile, extracted, match: null, facts: [], posting }, options);
     const kept = await tailorResume(model(answer), { profile, extracted, match: null, facts: [], posting, keepSkillOrder: true }, options);
@@ -267,7 +277,7 @@ describe("tailorResume", () => {
 
   it("returns units, keeping only real roles and the profile's own skills (APP-4)", async () => {
     const { data, promptVersion } = await tailorResume(model(answer), { profile, extracted, match: null, facts: [], posting }, options);
-    expect(promptVersion).toBe("tailor-resume@9");
+    expect(promptVersion).toBe("tailor-resume@10");
     expect(data.map((unit) => unit.id)).toEqual([
       "summary",
       "experience:e1",

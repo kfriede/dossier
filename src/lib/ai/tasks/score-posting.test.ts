@@ -26,7 +26,7 @@ describe("scorePosting (E16-2)", () => {
     const provider = new MockProvider({ reply: () => answer });
     const { data, promptVersion } = await scorePosting(provider, input, options);
     expect(promptVersion).toBe(SCORE_POSTING_VERSION);
-    expect(data).toEqual(answer);
+    expect(data).toMatchObject({ evidence: { requirements: expect.any(Array), questions: expect.any(Array) } });
 
     const call = sent(provider);
     const text = [call.system, ...call.messages.map((message) => message.content)].join("\n");
@@ -44,15 +44,14 @@ describe("scorePosting (E16-2)", () => {
     expect(call.effort).toBe("low");
   });
 
-  it("treats a big seniority gap either way as a mismatch, and gives the candidate's years worked out (#279)", async () => {
+  it("keeps eligibility separate and does not send total career duration as relevant experience", async () => {
     const provider = new MockProvider({ reply: () => answer });
     await scorePosting(provider, { ...input, today: new Date("2026-10-30T12:00:00Z") }, options);
     const call = sent(provider);
     expect(call.system).toMatch(/seniority and scope, in both directions: a role well below the candidate's level is as much a mismatch/);
-    expect(call.system).toMatch(/possible fit at best: below 70\. Years well beyond what a far more junior role asks for are never a reason it fits\./);
+    expect(call.system).toMatch(/only experience linked to duties relevant to that requirement can count/);
     expect(call.system).toMatch(/a seniority mismatch either way \(a role far above the candidate's level, or well below it\)/);
-    // The demo profile's roles run from September 2015 to now.
-    expect(call.messages[0].content).toContain("The candidate's work experience: about 11 years in all, counting overlapping roles once.");
+    expect(call.messages[0].content).not.toContain("years in all");
   });
 
   it("trusts nothing in the answer: a whole score within 0–100, and short lists within their limits", () => {
@@ -69,7 +68,7 @@ describe("scorePosting (E16-2)", () => {
   it("asks again when the answer doesn't have the shape", async () => {
     let calls = 0;
     const provider = new MockProvider({ reply: () => (++calls === 1 ? { score: "high" } : answer) });
-    expect((await scorePosting(provider, input, options)).data.score).toBe(86);
+    expect((await scorePosting(provider, input, options)).data.evidence).toBeDefined();
     expect(calls).toBe(2);
   });
 });

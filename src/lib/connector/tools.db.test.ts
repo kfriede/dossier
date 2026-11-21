@@ -1,6 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { saveSettings } from "@/lib/settings-data";
+import { fullText } from "@/lib/job-search/find";
 import { createTestClient, resetDatabase } from "@/test/db";
 
 import { seedBuiltIns } from "../../../prisma/seed/built-ins";
@@ -61,6 +62,7 @@ beforeEach(async () => {
   await saveSettings({ connectorEnabledAt: "2026-10-23T09:00:00.000Z", strict: false });
   fake.aiUsable = false;
   fake.fetched = { ok: true, text: "Fetched posting text", url: "https://jobs.example/fetched" };
+  vi.mocked(fullText).mockClear();
   const clientId = await registerClient({ name: "Claude", redirectUris: [CLAUDE] });
   const verifier = "v".repeat(50);
   const code = await issueCode({ clientId, redirectUri: CLAUDE, codeChallenge: challengeOf(verifier), resource: "" });
@@ -142,10 +144,87 @@ describe("the Claude connector's tools (#221)", () => {
     expect(await tool("get_posting")).toMatchObject({ isError: true, text: "Give posting_id, paste_id, search_id and number, posting_url, or posting_text." });
   });
 
+  it("imports bounded, source-labeled postings with safe deduplication and idempotent retries", async () => {
+    const postingText = "A".repeat(17_000);
+    const record = {
+      title: "Product Designer",
+      company: "Acme",
+      place: "Berlin",
+      posting_url: "https://jobs.example/acme?utm_source=research",
+      posting_text: postingText,
+      complete: true,
+      source_kind: "External research",
+      source_url: "https://research.example/acme",
+      requisition_id: "ACME-42",
+      reported_retrieved_at: "2026-10-23T09:00:00.000Z",
+      reported_checked_at: "2026-10-23T10:00:00.000Z",
+    };
+    const input = { idempotency_key: "import-acme-42", records: [record] };
+    const first = await tool("import_postings", input);
+    expect(first.isError).toBe(false);
+    expect(first.json).toMatchObject({ created: 1, items: [{ status: "created" }], replayed: false });
+
+    const row = await prisma().posting.findFirstOrThrow({ where: { source: "IMPORTED" } });
+    expect(row).toMatchObject({
+      source: "IMPORTED",
+      title: "Product Designer",
+      company: "Acme",
+      sourceKind: "External research",
+      sourceUrl: "https://research.example/acme",
+      requisitionId: "ACME-42",
+      reportedRetrievedAt: new Date("2026-10-23T09:00:00.000Z"),
+      reportedCheckedAt: new Date("2026-10-23T10:00:00.000Z"),
+      savedAt: expect.any(Date),
+    });
+
+    const chunk = await tool("get_posting", { posting_id: row.id });
+    expect(chunk.json).toMatchObject({
+      source: "imported",
+      complete: true,
+      source_context: { kind: "External research", url: "https://research.example/acme", verified: false },
+      posting_revision: expect.stringMatching(/^sha256:/),
+      offset: 0,
+      next_offset: 16_000,
+    });
+    expect((chunk.json.text as string).length).toBe(16_000);
+    const rest = await tool("get_posting", { posting_id: row.id, offset: chunk.json.next_offset });
+    expect(rest.json).toMatchObject({ posting_revision: chunk.json.posting_revision, offset: 16_000 });
+    expect((rest.json.text as string).length).toBeGreaterThan(0);
+    expect(vi.mocked(fullText)).not.toHaveBeenCalled();
+
+    const replay = await tool("import_postings", input);
+    expect(replay.json).toMatchObject({ created: 1, replayed: true });
+    expect(await prisma().posting.count({ where: { source: "IMPORTED" } })).toBe(1);
+
+    const changed = await tool("import_postings", {
+      idempotency_key: "import-acme-42-recheck",
+      records: [{ ...record, posting_text: `${postingText} changed` }],
+    });
+    expect(changed.isError).toBe(false);
+    expect(changed.json).toMatchObject({ needs_review: 1, items: [{ status: "needs_review" }] });
+    expect((await prisma().posting.findUniqueOrThrow({ where: { id: row.id } })).description).toBe(postingText);
+
+    const rejected = await tool("import_postings", { idempotency_key: "missing-required-fields", records: [{ title: "Incomplete entry" }] });
+    expect(rejected.isError).toBe(false);
+    expect(rejected.json).toMatchObject({ rejected: 1, items: [{ status: "rejected" }] });
+
+    const keyConflict = await tool("import_postings", {
+      idempotency_key: "import-acme-42",
+      records: [{ ...record, posting_text: `${postingText} changed` }],
+    });
+    expect(keyConflict.isError).toBe(true);
+    expect(keyConflict.text).toContain("already used with different content");
+  });
+
   it("saves an application Claude wrote, linked to the posting it came from", async () => {
     const search = await storeSearch([found("p1", "Product Designer")]);
     const profile = await prisma().experience.findFirstOrThrow({ orderBy: { sort: "asc" } });
+    const profileContext = await tool("get_profile");
+    const postingContext = await tool("get_posting", { search_id: search.id, number: 1 });
     const saved = await tool("save_application", {
+      idempotency_key: "save-acme-product-designer",
+      profile_revision: profileContext.json.profile_revision,
+      posting_revision: postingContext.json.posting_revision,
       search_id: search.id,
       number: 1,
       details: { company: "Acme", role: "Product Designer", location: "Berlin" },
@@ -154,13 +233,19 @@ describe("the Claude connector's tools (#221)", () => {
       match: [{ requirement: "Figma", result: "covered" }],
     });
     expect(saved.json).toMatchObject({ status: "Draft", application_id: expect.any(String) });
+    expect(saved.json.replayed).toBe(false);
     const id = saved.json.application_id as string;
-    expect(await prisma().application.findUniqueOrThrow({ where: { id } })).toMatchObject({ company: "Acme", status: "DRAFT", postingUrl: "https://jobs.example/p1" });
+    expect(await prisma().application.findUniqueOrThrow({ where: { id } })).toMatchObject({ company: "Acme", status: "DRAFT", awaitingReview: false, postingUrl: "https://jobs.example/p1" });
     expect((await prisma().posting.findFirstOrThrow({ where: { externalId: "p1" } })).applicationId).toBe(id);
 
     // A link Dossier can't read doesn't stop pasted text, and the link is kept.
     fake.fetched = { ok: false, error: "That page couldn't be reached." };
+    const pastedContext = await tool("get_posting", { posting_url: "https://jobs.example/sign-in-only", posting_text: "Product Designer at Acme" });
+    fake.fetched = { ok: true, text: "Product Designer at Acme", url: "https://jobs.example/sign-in-only" };
     const pasted = await tool("save_application", {
+      idempotency_key: "save-acme-sign-in-only",
+      profile_revision: profileContext.json.profile_revision,
+      posting_revision: pastedContext.json.posting_revision,
       posting_url: "https://jobs.example/sign-in-only",
       posting_text: "Product Designer at Acme",
       details: { company: "Acme", role: "Product Designer" },
@@ -172,8 +257,158 @@ describe("the Claude connector's tools (#221)", () => {
       postingUrl: "https://jobs.example/sign-in-only",
     });
 
-    expect(await tool("save_application", { details: { company: "Acme", role: "Designer" }, resume: { summary: "", roles: [], skills: [] }, cover_letter: { paragraphs: [{ text: "Hi" }] } })).toMatchObject({
-      isError: true,
+    const replay = await tool("save_application", {
+      idempotency_key: "save-acme-product-designer",
+      profile_revision: profileContext.json.profile_revision,
+      posting_revision: postingContext.json.posting_revision,
+      search_id: search.id,
+      number: 1,
+      details: { company: "Acme", role: "Product Designer", location: "Berlin" },
+      resume: { summary: "Designer who ships calm products.", roles: [{ id: profile.id, bullets: ["Led the payments redesign"] }], skills: ["Figma"] },
+      cover_letter: { paragraphs: [{ text: "I'd like to help Acme." }] },
+      match: [{ requirement: "Figma", result: "covered" }],
+    });
+    expect(replay.json).toMatchObject({ application_id: id, replayed: true });
+
+    expect(await tool("save_application", {
+      idempotency_key: "missing-posting",
+      profile_revision: profileContext.json.profile_revision,
+      posting_revision: "sha256:stale",
+      details: { company: "Acme", role: "Designer" },
+      resume: { summary: "", roles: [], skills: [] },
+    })).toMatchObject({ isError: true });
+  });
+
+  it("saves only the document the connector wrote", async () => {
+    const search = await storeSearch([found("single-document", "Product Designer")]);
+    const profileContext = await tool("get_profile");
+    const postingContext = await tool("get_posting", { search_id: search.id, number: 1 });
+    const profile = await prisma().experience.findFirstOrThrow({ orderBy: { sort: "asc" } });
+    const shared = {
+      profile_revision: profileContext.json.profile_revision,
+      posting_revision: postingContext.json.posting_revision,
+      search_id: search.id,
+      number: 1,
+      details: { company: "Acme", role: "Product Designer" },
+    };
+
+    const resumeOnly = await tool("save_application", {
+      ...shared,
+      idempotency_key: "resume-only",
+      resume: { summary: "A designer.", roles: [{ id: profile.id, bullets: ["Led a redesign"] }], skills: ["Figma"] },
+    });
+    const letterOnly = await tool("save_application", {
+      ...shared,
+      idempotency_key: "letter-only",
+      cover_letter: { paragraphs: [{ text: "I'd like to join Acme." }] },
+    });
+    const resumeDocuments = await prisma().document.findMany({ where: { applicationId: resumeOnly.json.application_id as string }, select: { kind: true } });
+    const letterDocuments = await prisma().document.findMany({ where: { applicationId: letterOnly.json.application_id as string }, select: { kind: true } });
+    expect(resumeDocuments.map((document) => document.kind)).toEqual(["RESUME"]);
+    expect(letterDocuments.map((document) => document.kind)).toEqual(["COVER_LETTER"]);
+  });
+
+  it("rejects stale profile and posting revisions before creating a draft", async () => {
+    const applicationCount = await prisma().application.count();
+    const posting = await prisma().posting.create({
+      data: { source: "JSEARCH", externalId: "revision-check", title: "Designer", company: "Acme", description: "Design systems.", complete: true },
+    });
+    const profileContext = await tool("get_profile");
+    const postingContext = await tool("get_posting", { posting_id: posting.id });
+    await prisma().profileField.upsert({
+      where: { key: "headline" },
+      create: { key: "headline", value: "Updated profile" },
+      update: { value: "Updated profile" },
+    });
+    const staleProfile = await tool("save_application", {
+      idempotency_key: "stale-profile",
+      profile_revision: profileContext.json.profile_revision,
+      posting_revision: postingContext.json.posting_revision,
+      posting_id: posting.id,
+      details: { company: "Acme", role: "Designer" },
+      resume: { summary: "A designer.", roles: [], skills: [] },
+    });
+    expect(staleProfile).toMatchObject({ isError: true });
+    expect(staleProfile.text).toContain("profile changed");
+
+    await prisma().posting.update({ where: { id: posting.id }, data: { salary: "$80k–$100k" } });
+    const currentProfile = await tool("get_profile");
+    const stalePosting = await tool("save_application", {
+      idempotency_key: "stale-posting",
+      profile_revision: currentProfile.json.profile_revision,
+      posting_revision: postingContext.json.posting_revision,
+      posting_id: posting.id,
+      details: { company: "Acme", role: "Designer" },
+      resume: { summary: "A designer.", roles: [], skills: [] },
+    });
+    expect(stalePosting).toMatchObject({ isError: true });
+    expect(stalePosting.text).toContain("posting changed");
+    expect(await prisma().application.count()).toBe(applicationCount);
+  });
+
+  it("rechecks a stored posting revision inside the application transaction", async () => {
+    const applicationCount = await prisma().application.count();
+    const posting = await prisma().posting.create({
+      data: { source: "JSEARCH", externalId: "transaction-revision-check", title: "Designer", company: "Acme", description: "The start", complete: false },
+    });
+    const profileContext = await tool("get_profile");
+    const postingContext = await tool("get_posting", { posting_id: posting.id });
+    vi.mocked(fullText).mockImplementationOnce(async () => {
+      await prisma().posting.update({
+        where: { id: posting.id },
+        data: { salary: "$80k–$100k", updatedAt: new Date(posting.updatedAt.getTime() + 1_000) },
+      });
+      return "The whole posting from its source";
+    });
+
+    const result = await tool("save_application", {
+      idempotency_key: "posting-changed-during-save",
+      profile_revision: profileContext.json.profile_revision,
+      posting_revision: postingContext.json.posting_revision,
+      posting_id: posting.id,
+      details: { company: "Acme", role: "Designer" },
+      resume: { summary: "A designer.", roles: [], skills: [] },
+    });
+    expect(result).toMatchObject({ isError: true });
+    expect(result.text).toContain("posting changed");
+    expect(await prisma().application.count()).toBe(applicationCount);
+  });
+
+  it("stores document proposals for review without changing the active or sent documents", async () => {
+    const application = await prisma().application.findFirstOrThrow({
+      where: { company: "Ledgerly", awaitingReview: false },
+      include: { documents: true },
+    });
+    const document = application.documents.find((entry) => entry.kind === "RESUME")!;
+    const currentUnits = document.units as { id: string; label: string; text: string; unverified?: string[] }[];
+    const proposedUnits = currentUnits.map((unit, index) => index === 0 ? { ...unit, text: `${unit.text} Revised.` } : unit);
+    const profileContext = await tool("get_profile");
+    const applicationContext = await tool("get_application", { id: application.id });
+    const documentRevision = (applicationContext.json.document_revisions as { kind: string; document_revision: string }[])
+      .find((entry) => entry.kind === "RESUME")!.document_revision;
+    const input = {
+      application_id: application.id,
+      document_kind: "RESUME",
+      document_revision: documentRevision,
+      profile_revision: profileContext.json.profile_revision,
+      proposed_units: proposedUnits,
+      source_context: { source: "connector", url: "https://jobs.example/revised", posting_revision: "sha256:posting" },
+      warnings: ["Check the edited claim."],
+      idempotency_key: "ledgerly-resume-proposal",
+    };
+
+    const saved = await tool("propose_document_revision", input);
+    expect(saved).toMatchObject({ isError: false });
+    expect(saved.json).toMatchObject({ status: "pending", replayed: false, warnings: ["Check the edited claim."] });
+    expect(await tool("propose_document_revision", input)).toMatchObject({
+      isError: false,
+      json: { proposal_id: saved.json.proposal_id, status: "pending", replayed: true },
+    });
+    expect(await prisma().documentProposal.count({ where: { applicationId: application.id } })).toBe(1);
+    expect(await prisma().document.findUniqueOrThrow({ where: { id: document.id } })).toMatchObject({ units: currentUnits });
+    expect(await prisma().application.findUniqueOrThrow({ where: { id: application.id }, select: { status: true, frozen: true } })).toEqual({
+      status: application.status,
+      frozen: application.frozen,
     });
   });
 

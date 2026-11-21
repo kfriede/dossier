@@ -13,7 +13,7 @@ import { logServerError } from "@/lib/log";
 // (src/lib/connector/oauth.ts); the proxy lets it through without a session.
 
 // The address links in answers point to comes along with the token's details.
-const handler = createMcpHandler(({ authInfo }) => createDossierServer(typeof authInfo?.extra?.origin === "string" ? authInfo.extra.origin : ""), {
+const handler = createMcpHandler(({ authInfo }) => createDossierServer(typeof authInfo?.extra?.origin === "string" ? authInfo.extra.origin : "", authInfo?.clientId ?? ""), {
   onerror: (error) => logServerError("MCP connector", error),
 });
 

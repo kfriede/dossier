@@ -34,6 +34,8 @@ const row = (id: string, extra: Partial<ApplicationRow> = {}): ApplicationRow =>
   updated: "4 weeks ago",
   updatedAt: Date.UTC(2026, 7, 31),
   boardSort: null,
+  queueSort: null,
+  hasRecipientDocuments: true,
   ...extra,
 });
 const params = { view: "table" as const, filter: "all" as const, q: "", sort: DEFAULT_SORT, archived: false };

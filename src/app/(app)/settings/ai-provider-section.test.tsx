@@ -21,7 +21,15 @@ beforeEach(() => {
   vi.mocked(saveAiProvider).mockReset().mockResolvedValue({ ok: true, data: { keyState: "none" } });
   vi.mocked(saveApiKey).mockReset().mockResolvedValue({ ok: true, data: { keyState: "set" } });
   vi.mocked(listAiModels).mockReset().mockResolvedValue({ ok: true, data: { models: ["llama3.1:8b", "qwen2.5:3b"], problem: null } });
-  vi.mocked(testAiConnection).mockReset().mockResolvedValue({ ok: true, data: { connected: true, model: "qwen2.5:3b", seconds: 1.4 } });
+  vi.mocked(testAiConnection)
+    .mockReset()
+    .mockResolvedValue({
+      ok: true,
+      data: {
+        text: { connected: true, model: "qwen2.5:3b", seconds: 1.4 },
+        structured: { connected: true, model: "qwen2.5:3b", seconds: 1.6 },
+      },
+    });
 });
 
 describe("AiProviderSection", () => {
@@ -97,16 +105,44 @@ describe("AiProviderSection", () => {
     render(<AiProviderSection initial={local} />);
     expect(screen.getByRole("status")).toHaveTextContent("Not tested since your last change");
     await userEvent.click(screen.getByRole("button", { name: "Test connection" }));
-    expect(await screen.findByText("Connected · qwen2.5:3b answered in 1.4 s")).toBeInTheDocument();
+    expect(await screen.findByText("Text completion: connected · qwen2.5:3b answered in 1.4 s")).toBeInTheDocument();
+    expect(screen.getByText("Schema-constrained response: connected · qwen2.5:3b answered in 1.6 s")).toBeInTheDocument();
   });
 
   it("shows a failure in plain words, and forgets the result after any change", async () => {
-    vi.mocked(testAiConnection).mockResolvedValue({ ok: true, data: { connected: false, message: "Couldn't reach the server. Check the address and that it's running." } });
+    vi.mocked(testAiConnection).mockResolvedValue({
+      ok: true,
+      data: {
+        text: { connected: true, model: "qwen2.5:3b", seconds: 1.4 },
+        structured: { connected: false, message: "The model's answer didn't come back in the expected shape. Try again." },
+      },
+    });
     render(<AiProviderSection initial={local} />);
     await userEvent.click(screen.getByRole("button", { name: "Test connection" }));
-    expect(await screen.findByText(/^Couldn't reach the server/)).toBeInTheDocument();
+    expect(await screen.findByText("Text completion: connected · qwen2.5:3b answered in 1.4 s")).toBeInTheDocument();
+    expect(
+      screen.getByText("Schema-constrained response: failed · The model's answer didn't come back in the expected shape. Try again."),
+    ).toBeInTheDocument();
     await userEvent.type(screen.getByLabelText("Server address"), "/");
     expect(screen.getByRole("status")).toHaveTextContent("Not tested since your last change");
+  });
+
+  it("uses LiteLLM setup guidance without adding a provider or changing the entered URL", async () => {
+    render(
+      <AiProviderSection
+        initial={{ provider: "OPENAI", baseUrl: "https://gateway.example/litellm/v1", model: "alias", keyState: "none" }}
+      />,
+    );
+    await userEvent.selectOptions(screen.getByLabelText("Setup preset"), "litellm");
+    expect(screen.getByRole("radio", { name: "OpenAI-compatible" })).toBeChecked();
+    expect(screen.getByLabelText("Server address")).toHaveValue("https://gateway.example/litellm/v1");
+    expect(screen.getByText(/Dossier will not guess the address or add \/v1/)).toBeInTheDocument();
+    expect(screen.getByText(/Enter the LiteLLM model alias exactly as configured, without a provider prefix/)).toBeInTheDocument();
+    expect(screen.getByLabelText("API key")).toHaveAttribute(
+      "placeholder",
+      "Stored encrypted on your server",
+    );
+    expect(screen.getAllByText(/restricted LiteLLM virtual key/)).toHaveLength(2);
   });
 
   it("lets you type a model that isn't listed", async () => {
@@ -124,5 +160,17 @@ describe("AiProviderSection", () => {
     render(<AiProviderSection initial={{ ...local, model: "" }} />);
     expect(await screen.findByText(/^Couldn't list the models: Couldn't reach the server/)).toBeInTheDocument();
     expect(screen.getByRole("option", { name: "Choose a model" })).toBeInTheDocument();
+  });
+
+  it("allows manual model entry when model discovery fails", async () => {
+    vi.mocked(listAiModels).mockResolvedValue({ ok: true, data: { models: [], problem: "The gateway denied model listing." } });
+    render(
+      <AiProviderSection initial={{ provider: "OPENAI", baseUrl: "https://gateway.example/v1", model: "", keyState: "none" }} />,
+    );
+    await screen.findByText(/^Couldn't list the models: The gateway denied model listing\./);
+    await userEvent.selectOptions(screen.getByLabelText("Model"), "Other model…");
+    await userEvent.type(screen.getByLabelText("Model name"), "alias-from-gateway");
+    await userEvent.tab();
+    await waitFor(() => expect(saveAiProvider).toHaveBeenLastCalledWith(expect.objectContaining({ model: "alias-from-gateway" })));
   });
 });

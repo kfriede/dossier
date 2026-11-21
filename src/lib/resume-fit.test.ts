@@ -25,7 +25,7 @@ describe("tailoredProfile (#370)", () => {
     expect(tailored.basics.name).toBe(profile.basics.name);
   });
 
-  it("keeps every skill when the resume has no skills part", () => {
-    expect(tailoredProfile(profile, []).skills).toEqual(profile.skills);
+  it("does not add profile skills that are absent from the resume", () => {
+    expect(tailoredProfile(profile, []).skills).toEqual([]);
   });
 });

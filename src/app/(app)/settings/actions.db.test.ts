@@ -56,7 +56,11 @@ const settings = () => loadSettings();
 beforeEach(async () => {
   await resetDatabase(prisma());
   await seedBuiltIns(prisma());
-  provider.current = new MockProvider({ model: "qwen2.5:3b", models: ["qwen2.5:3b", "llama3.1:8b"] });
+  provider.current = new MockProvider({
+    model: "qwen2.5:3b",
+    models: ["qwen2.5:3b", "llama3.1:8b"],
+    reply: (call) => (call.json ? { connected: true } : "OK"),
+  });
 });
 afterAll(() => prisma().$disconnect());
 
@@ -108,16 +112,35 @@ describe("saveApiKey", () => {
 });
 
 describe("testAiConnection and listAiModels", () => {
-  it("time a short prompt to the saved provider and list its models (SET-2)", async () => {
-    expect(await testAiConnection({})).toEqual({ ok: true, data: { connected: true, model: "qwen2.5:3b", seconds: expect.any(Number) } });
+  it("tests text and schema-constrained output separately, and lists models", async () => {
+    expect(await testAiConnection({})).toEqual({
+      ok: true,
+      data: {
+        text: { connected: true, model: "qwen2.5:3b", seconds: expect.any(Number) },
+        structured: { connected: true, model: "qwen2.5:3b", seconds: expect.any(Number) },
+      },
+    });
     expect(await listAiModels({})).toEqual({ ok: true, data: { models: ["qwen2.5:3b", "llama3.1:8b"], problem: null } });
   });
 
-  it("report a failure in plain words", async () => {
+  it("reports configuration failures for both tests in plain words", async () => {
     provider.current = new MockProvider({ model: null });
     expect(await testAiConnection({})).toEqual({
       ok: true,
-      data: { connected: false, message: "Choose a model in Settings → AI provider first." },
+      data: {
+        text: { connected: false, message: "Choose a model in Settings → AI provider first." },
+        structured: { connected: false, message: "Choose a model in Settings → AI provider first." },
+      },
+    });
+  });
+
+  it("does not treat text success as structured-output compatibility", async () => {
+    provider.current = new MockProvider({ model: "alias", reply: (call) => (call.json ? { connected: false } : "OK") });
+    expect(await testAiConnection({})).toMatchObject({
+      data: {
+        text: { connected: true },
+        structured: { connected: false, message: "The model's answer didn't come back in the expected shape. Try again." },
+      },
     });
   });
 });

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ApplicationRow } from "./applications-data";
-import { boardOrder, orderedColumn, withShownOrder } from "./board-order";
+import { boardOrder, orderedColumn, orderedQueue, queueOrder, withShownOrder } from "./board-order";
 
 const row = (id: string, extra: Partial<ApplicationRow> = {}): ApplicationRow => ({
   id,
@@ -18,6 +18,8 @@ const row = (id: string, extra: Partial<ApplicationRow> = {}): ApplicationRow =>
   updated: "Today",
   updatedAt: 100,
   boardSort: null,
+  queueSort: null,
+  hasRecipientDocuments: true,
   ...extra,
 });
 const ids = (rows: { id: string }[]) => rows.map((entry) => entry.id);
@@ -46,6 +48,22 @@ describe("withShownOrder", () => {
 
   it("orders the whole column when everything shows", () => {
     expect(ids(withShownOrder(column, ["d", "c", "b", "a"]))).toEqual(["d", "c", "b", "a"]);
+  });
+
+  describe("application queue order", () => {
+    it("uses explicit priority and places unranked applications newest first", () => {
+      const rows = [
+        row("second", { queueSort: 1 }),
+        row("new", { updatedAt: 200 }),
+        row("first", { queueSort: 0 }),
+        row("old", { updatedAt: 10 }),
+      ];
+      expect(ids(orderedQueue(rows))).toEqual(["new", "old", "first", "second"]);
+    });
+
+    it("compares Date timestamps", () => {
+      expect(queueOrder({ queueSort: null, updatedAt: new Date(1) }, { queueSort: null, updatedAt: new Date(2) })).toBeGreaterThan(0);
+    });
   });
 
   it("leaves hidden cards in their places", () => {

@@ -3,9 +3,11 @@
 import { useId } from "react";
 
 import { Card } from "@/components/ui/card";
+import { Select } from "@/components/ui/select";
 import { SegmentedControl } from "@/components/ui/segmented-control";
 import { Textarea } from "@/components/ui/textarea";
 import { Tone } from "@/generated/prisma/enums";
+import { RESUME_FAMILY_OPTIONS, type ResumeFamily } from "@/lib/resume-families";
 import { DOCUMENTS_TO_WRITE, type DocumentsToWrite } from "@/lib/settings";
 import { TONES } from "@/lib/tones";
 
@@ -16,16 +18,20 @@ const WRITE_OPTIONS = DOCUMENTS_TO_WRITE.map((value) => ({ value, label: WRITE_L
 /** "Tailoring" (E7-5, NEW-6): what to write (#367), the cover letter's tone, and a note for the AI. */
 export function TailoringCard({
   write,
+  resumeFamily,
   tone,
   note,
   onWrite,
+  onResumeFamily,
   onTone,
   onNote,
 }: {
   write: DocumentsToWrite;
+  resumeFamily: ResumeFamily;
   tone: Tone;
   note: string;
   onWrite: (write: DocumentsToWrite) => void;
+  onResumeFamily: (family: ResumeFamily) => void;
   onTone: (tone: Tone) => void;
   onNote: (note: string) => void;
 }) {
@@ -62,6 +68,21 @@ export function TailoringCard({
           </span>
         </div>
       </div>
+      )}
+      {write !== "letter" && (
+        <Select
+          label="Resume focus"
+          hint="Changes which existing profile evidence gets emphasis, not the facts on your profile."
+          value={resumeFamily}
+          onChange={(event) => onResumeFamily(event.target.value as ResumeFamily)}
+          className="max-w-[360px]"
+        >
+          {RESUME_FAMILY_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </Select>
       )}
       <Textarea
         label="Anything I should know?"
